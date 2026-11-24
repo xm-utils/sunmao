@@ -53,7 +53,7 @@
 ## 安装
 
 ```bash
-go get github.com/xm-utils/tools/nacos
+go get github.com/xm-utils/sunmao/nacos
 ```
 
 **依赖要求**：
@@ -67,7 +67,7 @@ package main
 
 import (
     "fmt"
-    "github.com/xm-utils/tools/nacos"
+    "github.com/xm-utils/sunmao/nacos"
 )
 
 func main() {
@@ -408,7 +408,7 @@ err := namingClient.BatchDeregisterInstances(instances)
 import (
     "google.golang.org/grpc"
     "google.golang.org/grpc/credentials/insecure"
-    "github.com/xm-utils/tools/nacos"
+    "github.com/xm-utils/sunmao/nacos"
 )
 
 // 创建 ResolverBuilder
