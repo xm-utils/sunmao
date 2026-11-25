@@ -1,6 +1,8 @@
 # lock — 5 分钟上手
 
-从零到能用：进程内锁 → 分布式锁 → 租期与续期 → 重入语义 → 错误分级 → 排障。
+从零到能用：进程内锁 → 分布式锁 → 租期与续期 → 重入语义 → 错误分级 → 排障与指标。
+
+想看能跑的完整用法，直接读 `example_test.go` 与两个后端的 `example_test.go`——它们带 `// Output:` 断言，跑 `go test ./...` 就在验证，不会过期。
 
 ## 1. 引入与最小可用
 
@@ -25,7 +27,17 @@ defer func() { _ = mu.Unlock(ctx) }()                      // 谁加锁谁解锁
 // 临界区
 ```
 
-`lock.Config` 零值即安全：`TTL` 30s、轮询 100ms 带 ±25% 抖动、续期 `TTL/3`、重入按 goroutine 绑定。**记住这个前提：`Local` 的互斥范围只在同一实例内**，多副本部署要换后端（见第 3 步）。
+`lock.Config` 零值即安全：`TTL` 30s（下限 1ms）、轮询 100ms 带 ±25% 抖动、续期 `TTL/3`、重入按 goroutine 绑定。**记住这个前提：`Local` 的互斥范围只在同一实例内**，多副本部署要换后端（见第 3 步）。
+
+不想自己管解锁点就用 `lock.Do`，获取-执行-释放一次调用完成（契约层可用，换后端不影响）：
+
+```go
+err := lock.Do(ctx, mu, func() error {
+    return buildReport()          // panic 也会先归还锁再把 panic 抛回
+})
+```
+
+业务错误与释放错误同时存在时 `Do` 用 `errors.Join` 合并返回，不会拿释放错误盖掉业务错误。
 
 ## 2. 定时任务：抢不到就跳过（`TryLock`）
 
@@ -63,7 +75,7 @@ mu, err = lock.New(lock.Config{Key: "sharding:ddl:orders_202611", TTL: 60 * time
 // ② Redis（跨实例互斥 + 栅栏 token）
 client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})   // 或 redis 组件建好的客户端
 mu, err = redisstore.New(redisstore.Config{
-    Client: client,
+    Client: client,                       // 接口类型：ClusterClient / Ring / UniversalClient 同可
     Config: lock.Config{Key: "sharding:ddl:orders_202611", TTL: 60 * time.Second},
 })
 
@@ -190,17 +202,50 @@ consul session list -verbose                               # 会话名格式 xm_
 
 排障口诀：**「锁没释放」看 PTTL 是否在走、「谁拿着」看 owner 字段（含主机名+PID+goid，可直接定位实例与 goroutine）、「反复丢锁」对比 TTL 与任务耗时**。
 
+### 拉一份运行快照
+
+三端都实现了 `Stats()`，纯本地读、不发后端请求，在临界区内调同样安全：
+
+```go
+st := mu.Stats()
+log.Println(st)                              // 一行摘要：attempts/busy/timeouts/lost/avg_wait…
+if st.ContentionRatio() > 0.5 {
+    log.Println("这把锁竞争很凶，考虑拆 Key 或改 TryLock 跳过")
+}
+if st.Lost > 0 {
+    log.Println("出现过丢锁，临界区可能并发执行过，检查任务幂等")
+}
+```
+
+口径两句话：**等到超时的回次也计等待时长，丢锁那一轮不计持有时长**——否则「被抢占」会被读成「正常持有」。计数自实例创建起累计，复位只能靠重建实例。
+
+### 接进 Prometheus
+
+```go
+import (
+    "github.com/xm-utils/sunmao/metrics"
+    xmlock "github.com/xm-utils/sunmao/metrics/adapter/lock"
+)
+
+metrics.RegisterExporter(xmlock.New(ddlMu, recoverMu))   // 任意 lock.Statser，后端可混用
+```
+
+采集器每次抓取实时拉取一次 `Stats()`，输出 `xmt_lock_operations_total{op,result}`、`xmt_lock_errors_total`、`xmt_lock_duration_seconds_total{phase}`、`xmt_lock_contention_ratio`、`xmt_lock_state{field}` 五个指标族；告警示例 `rate(xmt_lock_operations_total{result="lost"}[5m]) > 0`（细节见 `metrics/QUICKSTART.md`）。
+
 ## 常见错误
 
 | 错误写法 | 后果 | 正确做法 |
 |---|---|---|
 | 多副本部署用 `lock.New`（Local） | 各副本都以为拿到了锁，重复执行不报错 | 跨实例一律 `redisstore` / `consulstore` |
 | `TTL` 取得比任务耗时还短 | 任务跑到一半被抢占 → `ErrLost`，临界区并发 | `TTL ≥ 2 × 最坏耗时`，或关闭看门狗自行 `Refresh` |
-| 忘了 `Unlock`（尤其错误分支） | 服务端要等满租期才恢复，期间全部副本跳过 | `defer func() { _ = mu.Unlock(ctx) }()` 紧跟获取成功之后 |
+| 忘了 `Unlock`（尤其错误分支） | 服务端要等满租期才恢复，期间全部副本跳过 | 直接用 `lock.Do(ctx, mu, fn)` 把配对收敛成一次调用；手写时 `defer func() { _ = mu.Unlock(ctx) }()` 紧跟获取成功之后 |
 | A goroutine 加锁、B goroutine 解锁 | `ErrNotHeld`（默认 goroutine 绑定属主） | 同 goroutine 成对使用；确需跨 goroutine 收尾就统一用 `Close` 或设静态 `Owner` |
 | 把 `ErrBusy` 当日志错误/告警 | 告警风暴，掩盖真问题 | `errors.Is(err, lock.ErrBusy)` 直接本轮跳过 |
 | `err.Error() == "lock: busy"` | 消息格式变动即失效 | 一律 `errors.Is` 判哨兵 |
 | 每次加锁都 `New` 一个实例 | 多轮会话/脚本建立开销，观测上会话乱跳 | 一个 Key 一个实例常驻，多 goroutine 并发复用 |
 | 用 `Local` 时指望 `TTL` 自动过期 | `Local` 没有租期，持锁 goroutine 泄漏就永久阻塞 | 进程内也要保证解锁；跨进程需求换后端 |
 | `WaitTimeout` 与 ctx 都不设，纯 `Lock` 死等 | 后端持续 busy 时 goroutine 长挂 | 设 `WaitTimeout`，并把 `ErrTimeout` 当作可容忍的降级分支 |
+| `TTL` 设成亚毫秒 | 服务端只认毫秒，静默接受会得到一抢就过期的空锁 | `TTL >= 1ms`（构造期即报 `ErrInvalidConfig`），业务锁建议 5s 起 |
 | `OnRenewError` 里做阻塞 IO | 拖慢看门狗节拍，续期赶不上租期 | 只做投递（channel / 打点），重活交给外层 |
+| 用 `lock.Do` 做 ticker 任务的「抢不到就跳过」 | `Do` 内部是 `Lock`，会排队而不是跳过 | 跳过语义自己写 `TryLock` + `errors.Is(err, lock.ErrBusy)`（见第 2 步）|
+

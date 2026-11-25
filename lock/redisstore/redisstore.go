@@ -153,6 +153,7 @@ type Mutex struct {
 	cfg      lock.Config
 	hashKey  string
 	fenceKey string
+	rec      lock.Recorder // 运行计数,供 Stats() 拉取
 
 	wd *lock.Watchdog
 
@@ -168,6 +169,7 @@ var (
 	_ lock.Fencer    = (*Mutex)(nil)
 	_ lock.Holder    = (*Mutex)(nil)
 	_ lock.Refresher = (*Mutex)(nil)
+	_ lock.Statser   = (*Mutex)(nil)
 )
 
 // New 创建 Redis 锁;配置非法返回包装 lock.ErrInvalidConfig 的 error,不 panic。
@@ -205,22 +207,37 @@ func (m *Mutex) Key() string { return m.cfg.Key }
 // Lock 阻塞获取,直到成功、ctx 取消/超时、WaitTimeout 到点或后端故障。
 // 等待为服务端轮询(多进程无共享内存,无法像进程内锁那样释放即唤醒)。
 func (m *Mutex) Lock(ctx context.Context) error {
-	return lock.WaitAcquire(ctx, &m.cfg, m.attempt)
+	start := time.Now()
+	err := lock.WaitAcquire(ctx, &m.cfg, m.attempt)
+	// 等待时长无条件累计:等到超时/被取消同样花了时间
+	m.rec.NoteWait(time.Since(start))
+	if err != nil {
+		m.rec.NoteFailure(err)
+		return err
+	}
+	return nil
 }
 
 // TryLock 非阻塞获取;被占用返回包装 lock.ErrBusy 的 error
 func (m *Mutex) TryLock(ctx context.Context) error {
 	acquired, busy, err := m.attempt(ctx)
 	if err != nil {
+		m.rec.NoteFailure(err)
 		return err
 	}
 	if acquired {
 		return nil
 	}
 	if !busy {
-		return fmt.Errorf("%w: key=%s 获取尝试返回异常状态", lock.ErrInvalidConfig, m.cfg.Key)
+		return m.noteAbnormal(fmt.Errorf("%w: key=%s 获取尝试返回异常状态", lock.ErrInvalidConfig, m.cfg.Key))
 	}
 	return fmt.Errorf("%w: key=%s 正被持有", lock.ErrBusy, m.cfg.Key)
+}
+
+// noteAbnormal 统一「尝试返回异常状态」的记账与返回
+func (m *Mutex) noteAbnormal(err error) error {
+	m.rec.NoteFailure(err)
+	return err
 }
 
 // Unlock 释放锁:可重入时只减一层深度,减到 0 才真正删除服务端状态。
@@ -243,10 +260,10 @@ func (m *Mutex) unlockAs(ctx context.Context, caller string) error {
 	held := m.heldOwner
 	m.mu.Unlock()
 	if localDepth == 0 {
-		return fmt.Errorf("%w: key=%s 本实例未持有", lock.ErrNotHeld, m.cfg.Key)
+		return m.noteReleaseRejected(fmt.Errorf("%w: key=%s 本实例未持有", lock.ErrNotHeld, m.cfg.Key))
 	}
 	if caller != held {
-		return fmt.Errorf("%w: key=%s 释放者 %q 非当前持有者 %q", lock.ErrNotHeld, m.cfg.Key, caller, held)
+		return m.noteReleaseRejected(fmt.Errorf("%w: key=%s 释放者 %q 非当前持有者 %q", lock.ErrNotHeld, m.cfg.Key, caller, held))
 	}
 
 	runCtx := ctx
@@ -257,19 +274,23 @@ func (m *Mutex) unlockAs(ctx context.Context, caller string) error {
 
 	arr, err := m.eval(runCtx, releaseLua, nil, held)
 	if err != nil {
+		m.rec.NoteFailure(fmt.Errorf("lock/redisstore: 释放失败: %w", err))
 		return fmt.Errorf("lock/redisstore: 释放失败: %w", err)
 	}
 	code, depth, err := codeDepth(arr)
 	if err != nil {
+		m.rec.NoteFailure(err)
 		return err
 	}
 
 	m.mu.Lock()
 	needStop := false
+	full := true // 只有 code==1(仍有深度)时置 false
 	var retErr error
 	switch code {
 	case 1: // 仍有残留深度
 		m.depth = int(depth)
+		full = false
 	case 0: // 彻底释放
 		m.clearLocked()
 		needStop = true
@@ -289,12 +310,28 @@ func (m *Mutex) unlockAs(ctx context.Context, caller string) error {
 	}
 	m.mu.Unlock()
 
+	// 记账同样放在锁外:Recorder 全原子,但集中一处更易对照返回码读
+	switch {
+	case retErr != nil:
+		m.noteReleaseRejected(retErr)
+	case full:
+		m.rec.NoteReleased(true)
+	default:
+		m.rec.NoteReleased(false)
+	}
+
 	// 停止看门狗必须在 m.mu 之外:Stop 等待在飞的续期 goroutine 退出,而 renew 入口
 	// 正需要这把锁读属主视图——锁内 Stop 会让两者互等死锁。
 	if needStop {
 		m.wd.Stop()
 	}
 	return retErr
+}
+
+// noteReleaseRejected 统一「释放被拒」的记账与返回
+func (m *Mutex) noteReleaseRejected(err error) error {
+	m.rec.NoteReleaseRejected(err)
+	return err
 }
 
 // Close 停止看门狗并释放仍持有的锁。本地复位与看门狗停止总会完成,释放中的错误
@@ -345,6 +382,27 @@ func (m *Mutex) Depth() int {
 	return m.depth
 }
 
+// Stats 返回本实例的运行计数快照(实现 lock.Statser)。
+// Holding/Depth/Fence 取本地视图——服务端是否仍归本实例以下一次操作结果为准;
+// 续期计数含看门狗与手动 Refresh 两条路径,口径与 redisstore 实际发的命令一致。
+func (m *Mutex) Stats() lock.Stats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	fence := m.fence
+	if m.depth == 0 {
+		fence = 0
+	}
+	return m.rec.Snapshot(lock.Stats{
+		Key:     m.cfg.Key,
+		Backend: "redis",
+		TTL:     m.cfg.TTL,
+		Depth:   m.depth,
+		Holding: m.depth > 0,
+		Fence:   fence,
+		Closed:  m.closed,
+	})
+}
+
 // Refresh 手动续期一次本次持有的租期。
 // 默认看门狗已按 RenewInterval(缺省 TTL/3)自动续期,无需调用;
 // 配置 RenewInterval=-1 关闭后,长任务必须自行周期调用本方法。
@@ -393,6 +451,7 @@ func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
 		return false, false, fmt.Errorf("%w: OwnerFunc 返回空串, 无法标识持有者", lock.ErrInvalidConfig)
 	}
 
+	m.rec.NoteAttempt() // 走到这里才是真正的一轮服务端尝试
 	arr, err := m.eval(ctx, acquireLua, []string{m.fenceKey}, owner, m.cfg.TTL.Milliseconds())
 	if err != nil {
 		return false, false, fmt.Errorf("lock/redisstore: 获取失败: %w", err)
@@ -421,20 +480,30 @@ func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
 		m.heldOwner = owner
 		m.fence = uint64(fence)
 		m.mu.Unlock()
+		m.rec.NoteAcquired(first)
 		if first {
 			m.wd.Start()
 		}
 		return true, false, nil
 	case codeBusy:
+		m.rec.NoteBusy()
 		return false, true, nil
 	default:
 		return false, false, fmt.Errorf("%w: 获取脚本返回未知码 %d", lock.ErrInvalidConfig, code)
 	}
 }
 
-// renew 看门狗续期:以本轮记录的属主为准(续期由独立 goroutine 驱动,
-// 其 goroutine 标识与持锁方不同,不能用 CurrentOwner 现取)。
+// renew 看门狗续期入口:无论来自看门狗、手动 Refresh 还是测试驱动,计数都在这一处落,
+// 保证「续期失败次数」与调用方看到的错误一一对应。
 func (m *Mutex) renew(ctx context.Context) error {
+	err := m.renewOnce(ctx)
+	m.rec.NoteRenew(err)
+	return err
+}
+
+// renewOnce 看门狗续期:以本轮记录的属主为准(续期由独立 goroutine 驱动,
+// 其 goroutine 标识与持锁方不同,不能用 CurrentOwner 现取)。
+func (m *Mutex) renewOnce(ctx context.Context) error {
 	m.mu.Lock()
 	owner, holding := m.heldOwner, m.depth > 0
 	m.mu.Unlock()

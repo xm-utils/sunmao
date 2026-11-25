@@ -4,7 +4,7 @@
 
 - 模块路径：`github.com/xm-utils/sunmao/metrics`
 - 技术选型：`prometheus/client_golang`（v1.22.0），不引入其他指标链
-- 兼容策略：**不删除、不修改** `breaker` / `mq/kafka/client` / `deadletter` / `ratelimit` 各自的私有指标实现；接入一律经 `metrics/adapter/*` 薄适配器（拉取式 `prometheus.Collector`），组件本体零依赖本包
+- 兼容策略：**不删除、不修改** `breaker` / `mq/kafka/client` / `deadletter` / `ratelimit` / `lock` 各自的私有指标实现；接入一律经 `metrics/adapter/*` 薄适配器（拉取式 `prometheus.Collector`），组件本体零依赖本包
 
 ## 目录结构
 
@@ -17,6 +17,7 @@ metrics/
 │   ├── breaker/               # CircuitBreaker(Metrics) / Manager 快照 → xmt_breaker_*
 │   ├── kafka/                 # client.ConsumerMetrics 累计+窗口 → xmt_kafka_consumer_*
 │   ├── deadletter/            # QueueMetrics.GetStats → xmt_deadletter_*（panic 安全）
+│   ├── lock/                  # Statser.Stats 获取/释放/续期计数 → xmt_lock_*（panic 安全）
 │   └── ratelimit/             # Local.Snapshots 判定计数+水位 → xmt_ratelimit_*（panic 安全）
 └── config.example.yaml
 ```
@@ -149,6 +150,30 @@ metrics.Register(rlmetrics.NewWithProvider(fn))   // 自定义快照源：多后
 
 > 区间拒绝率（告警用）不在指标侧计算，由 `ratelimit/alert` 直接差分快照得出，见该组件 README。
 
+### lock（`metrics/adapter/lock`）
+
+```go
+import xmlock "github.com/xm-utils/sunmao/lock"
+import lockmetrics "github.com/xm-utils/sunmao/metrics/adapter/lock"
+
+metrics.Register(lockmetrics.New(ddlMu, recoverMu))   // 若干 lock.Statser（三端实例可混用）
+metrics.Register(lockmetrics.NewWithProvider(func() map[string]xmlock.Stats {
+    return lockRegistry.Snapshot()                    // 装配层自持锁注册表时用
+}))
+```
+
+抓取时逐个调实例的 `Stats()`（拉取式，不包装锁本体）；provider 或单个实例 panic 各自兜底为抓取错误，**一个坏实例不会带走其他锁的样本**。负时长（外部 provider 交出脏快照）被夹持为 0，`backend` 为空时回退为 `unknown` 标签。
+
+| 指标 | 类型 | label |
+|---|---|---|
+| `xmt_lock_operations_total` | counter | `key`, `backend`, `op=acquire\|release\|renew`, `result` |
+| `xmt_lock_errors_total` | counter | `key`, `backend`（后端故障与误用，跨三条路径汇总）|
+| `xmt_lock_duration_seconds_total` | counter | `key`, `backend`, `phase=wait\|hold` |
+| `xmt_lock_contention_ratio` | gauge | `key`, `backend`（累计撞锁比例 0~1；`Attempts=0` 时不产出）|
+| `xmt_lock_state` | gauge | `key`, `backend`, `field=holding\|depth\|fence\|closed` |
+
+> `acquire` 的 `result` 取 `acquired/reentered/busy/timeout/lost/canceled`，`release` 取 `full/decreased/rejected`，`renew` 取 `ok/failed`。区间竞争率请对 `xmt_lock_operations_total` 做 `rate()` 推导；`lock` 侧字段口径见该组件 README「观测与指标」。
+
 ## 设计说明
 
 1. **拉取式适配器**：适配器不包装、不拦截组件写入路径，仅在抓取瞬间读快照——组件私有 `metrics.go` 保持原语义，独立可引。
@@ -163,10 +188,13 @@ metrics.Register(rlmetrics.NewWithProvider(fn))   // 自定义快照源：多后
   当前指向含 `Local.Snapshots` / `KeySnapshot` 的 `1728355`，`GOWORK=off` 可独立构建；
   ratelimit 接口后续变更时，需先 `go get github.com/xm-utils/sunmao/ratelimit@<commit>` 再 tidy
   （tidy 仅保证 import 可解析，不会自动升级已有 requirement）；ratelimit 发版后可转正式 tag。
+- `github.com/xm-utils/sunmao/lock` 同样未发 tag：适配器在工作区内可直接编译，但 `go.mod` 里还没有
+  lock 的 requirement，`GOWORK=off` 下 `metrics/adapter/lock` 解析不到该模块——待 lock 推送到远程后
+  `go get github.com/xm-utils/sunmao/lock@<commit>` + `go mod tidy` 收尾（与 ratelimit 同一路径）。
 - 本模块未打 tag；接口冻结后发布 `metrics/v0.1.0`。
 
 ## 测试
 
 ```bash
-go test -race ./...        # 根包 + 四个适配器；deadletter/ratelimit 用例可离线运行
+go test -race ./...        # 根包 + 五个适配器；deadletter/ratelimit/lock 用例可离线运行
 ```

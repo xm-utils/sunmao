@@ -23,7 +23,8 @@ lock:
   # ==================== 通用语义（→ lock.Config，两端一致） ====================
   # 锁标识：按业务语义命名，建议带作用域前缀；留空报 lock.ErrInvalidConfig
   key: "deadletter:recover:order-pay"
-  ttl: 30s                  # → lock.Config.TTL，租期；留空/0 取默认 30s。持有者崩溃后最迟经此时长被抢占
+  ttl: 30s                  # → lock.Config.TTL，租期；留空/0 取默认 30s；下限 1ms（服务端毫秒计时，更短报 ErrInvalidConfig）。持有者崩溃后最迟经此时长被抢占
+                            #   consul 后端：小于服务端 session_ttl_min（默认 10s）的 ttl 会被 Consul 抬高到 10s，要更快回收需改服务端参数
   wait_timeout: 0s          # → lock.Config.WaitTimeout，Lock 的最长等待；0=不限（仅受 ctx 约束）
   poll_interval: 100ms      # → lock.Config.PollInterval，竞争重试间隔，内部加 ±25% 抖动；下限 1ms
   renew_interval: 0s        # → lock.Config.RenewInterval，看门狗续期间隔；0 取 TTL/3；-1 关闭自动续期
@@ -35,12 +36,17 @@ lock:
   #   on_renew_error → 装配层接 logging/metrics，把续期失败打成告警
 
   # ==================== Redis 后端（backend=redis） ====================
-  # client 字段无法由 YAML 表达：由装配层用 redis 组件 InitRedisCache 建好 *redis.Client 后
-  # 注入 redisstore.Config.Client（go-redis v8，与 redis 组件同版本）
+  # client 字段无法由 YAML 表达：由装配层建好客户端后注入 redisstore.Config.Client。
+  #   该字段是接口（redisstore.Client = redis.Scripter + PTTL），go-redis v8 的
+  #   *redis.Client / *redis.ClusterClient / *redis.Ring / redis.UniversalClient 皆可传入；
+  #   部署为 Cluster/Sentinel 时换对应客户端即可，锁 Key 的 {tag} 保证两个键同 slot
   redis:
     addr: "127.0.0.1:6379"   # → redis.Options.Addr
     password: ""             # → redis.Options.Password
     db: 0                    # → redis.Options.DB
+    # 集群/哨兵部署改填各自形态（装配层决定，键位仅为示意）：
+    # addrs: ["10.0.0.1:6379", "10.0.0.2:6379"]   # → redis.ClusterOptions.Addrs / UniversalOptions.Addrs
+    # master_name: "xm-master"                     # → redis.FailoverOptions.MasterName
 
   # ==================== Consul 后端（backend=consul） ====================
   # backend 字段同样无法由 YAML 表达：装配层用 consul 组件建好 *consul.Client 后
@@ -151,4 +157,13 @@ lock:
 #     // 用法二：启动期 DDL 串行化（等待而非跳过）
 #     //   if err := mu.Lock(ctx); err != nil { ... }  // ErrTimeout / ctx 取消可区分
 #     //   defer func() { _ = mu.Unlock(ctx) }()
+#     //
+#     // 用法三：不打算自己管解锁点时用配对函数（错误分支与 panic 都会归还锁）
+#     //   err := lock.Do(ctx, mu, func() error { return runMigration(ctx) })
+#     //   // 获取失败不执行 fn；fn 报错时释放错误与业务错误 errors.Join 一并回传
+#
+#     // 用法四：观测（无需额外配置键，三端均有 Stats()）
+#     //   log.Println(mu.Stats())                       // 一行摘要，适合定时打点
+#     //   metrics.Register(lockmetrics.New(mu))         // → xmt_lock_* 指标族
+#     //   // lockmetrics = github.com/xm-utils/sunmao/metrics/adapter/lock，拉取式采集器
 # }

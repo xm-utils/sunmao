@@ -69,6 +69,7 @@ type Mutex struct {
 	backend Backend
 	cfg     lock.Config
 	kvKey   string
+	rec     lock.Recorder // 运行计数,供 Stats() 拉取
 
 	wd *lock.Watchdog
 
@@ -83,7 +84,9 @@ var (
 	_ lock.Mutex     = (*Mutex)(nil)
 	_ lock.Holder    = (*Mutex)(nil)
 	_ lock.Refresher = (*Mutex)(nil)
+	_ lock.Statser   = (*Mutex)(nil)
 	// 不实现 lock.Fencer:consul 组件未透出 KV 的 ModifyIndex,无单调栅栏值可用
+	// (Stats().Fence 因此恒为 0)
 )
 
 // New 创建 Consul 锁;配置非法返回包装 lock.ErrInvalidConfig 的 error,不 panic
@@ -123,22 +126,37 @@ func (m *Mutex) KVKey() string { return m.kvKey }
 // 等待为轮询:consul 组件的 AcquireLock 不阻塞,而其 blocking query(WatchKV)
 // 不接受 ctx,取消语义会失真,故统一走带抖动的轮询。
 func (m *Mutex) Lock(ctx context.Context) error {
-	return lock.WaitAcquire(ctx, &m.cfg, m.attempt)
+	start := time.Now()
+	err := lock.WaitAcquire(ctx, &m.cfg, m.attempt)
+	// 等待时长无条件累计:等到超时/被取消同样花了时间
+	m.rec.NoteWait(time.Since(start))
+	if err != nil {
+		m.rec.NoteFailure(err)
+		return err
+	}
+	return nil
 }
 
 // TryLock 非阻塞获取;被占用返回包装 lock.ErrBusy 的 error
 func (m *Mutex) TryLock(ctx context.Context) error {
 	acquired, busy, err := m.attempt(ctx)
 	if err != nil {
+		m.rec.NoteFailure(err)
 		return err
 	}
 	if acquired {
 		return nil
 	}
 	if !busy {
-		return fmt.Errorf("%w: key=%s 获取尝试返回异常状态", lock.ErrInvalidConfig, m.cfg.Key)
+		return m.noteAbnormal(fmt.Errorf("%w: key=%s 获取尝试返回异常状态", lock.ErrInvalidConfig, m.cfg.Key))
 	}
 	return fmt.Errorf("%w: key=%s 正被持有", lock.ErrBusy, m.cfg.Key)
+}
+
+// noteAbnormal 统一「尝试返回异常状态」的记账与返回
+func (m *Mutex) noteAbnormal(err error) error {
+	m.rec.NoteFailure(err)
+	return err
 }
 
 // Unlock 释放锁:可重入时只减一层深度,减到 0 才释放 KV 并销毁会话。
@@ -159,15 +177,16 @@ func (m *Mutex) unlockAs(caller string) error {
 	m.mu.Lock()
 	if m.depth == 0 {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: key=%s 本实例未持有", lock.ErrNotHeld, m.cfg.Key)
+		return m.noteReleaseRejected(fmt.Errorf("%w: key=%s 本实例未持有", lock.ErrNotHeld, m.cfg.Key))
 	}
 	if caller != m.heldOwner {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: key=%s 释放者 %q 非当前持有者 %q", lock.ErrNotHeld, m.cfg.Key, caller, m.heldOwner)
+		return m.noteReleaseRejected(fmt.Errorf("%w: key=%s 释放者 %q 非当前持有者 %q", lock.ErrNotHeld, m.cfg.Key, caller, m.heldOwner))
 	}
 	if m.depth > 1 {
 		m.depth--
 		m.mu.Unlock()
+		m.rec.NoteReleased(false)
 		return nil
 	}
 	session := m.sessionID
@@ -177,24 +196,32 @@ func (m *Mutex) unlockAs(caller string) error {
 	// Destroy 失败不影响锁已释放的事实,仅记录到返回错误中。
 	released, err := m.release(session)
 	if err != nil {
+		m.rec.NoteFailure(err)
 		return fmt.Errorf("lock/consulstore: 释放失败: %w", err)
 	}
 	if !released {
 		m.forfeit()
-		return fmt.Errorf("%w: key=%s 属主已失, 释放被 Consul 拒绝(会话可能已过期): %w",
-			lock.ErrLost, m.cfg.Key, lock.ErrNotHeld)
+		return m.noteReleaseRejected(fmt.Errorf("%w: key=%s 属主已失, 释放被 Consul 拒绝(会话可能已过期): %w",
+			lock.ErrLost, m.cfg.Key, lock.ErrNotHeld))
 	}
 
 	m.mu.Lock()
 	m.clearLocked()
 	m.mu.Unlock()
 	m.wd.Stop()
+	m.rec.NoteReleased(true)
 
 	if derr := m.backend.DestroySession(session); derr != nil {
 		return fmt.Errorf("lock/consulstore: 锁已释放但会话销毁失败, 该会话将在 TTL %v 后自动回收: %w",
 			m.cfg.TTL, derr)
 	}
 	return nil
+}
+
+// noteReleaseRejected 统一「释放被拒」的记账与返回
+func (m *Mutex) noteReleaseRejected(err error) error {
+	m.rec.NoteReleaseRejected(err)
+	return err
 }
 
 // Close 停止看门狗、释放仍持有的锁并销毁会话。本地复位与看门狗停止总会完成,
@@ -241,6 +268,22 @@ func (m *Mutex) Depth() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.depth
+}
+
+// Stats 返回本实例的运行计数快照(实现 lock.Statser)。
+// Fence 恒为 0(consulstore 不提供栅栏);重入时顺带的 RenewSession 同样计入续期计数,
+// 因为它确实向 Consul 发了一次会话续期。
+func (m *Mutex) Stats() lock.Stats {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.rec.Snapshot(lock.Stats{
+		Key:     m.cfg.Key,
+		Backend: "consul",
+		TTL:     m.cfg.TTL,
+		Depth:   m.depth,
+		Holding: m.depth > 0,
+		Closed:  m.closed,
+	})
 }
 
 // heldOwnerOf 返回记录属主(供 Close 以持有者身份归还 KV 与会话)
@@ -290,22 +333,27 @@ func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
 		m.mu.Unlock()
 		return false, false, fmt.Errorf("%w: key=%s", lock.ErrClosed, m.cfg.Key)
 	}
+	m.rec.NoteAttempt()
 	if m.depth > 0 {
 		// 已有持有者:同 Owner 视为重入,他人直接判 busy(不查 Consul)
 		if m.heldOwner != owner {
 			m.mu.Unlock()
+			m.rec.NoteBusy()
 			return false, true, nil
 		}
 		m.depth++
 		session := m.sessionID
 		m.mu.Unlock()
 		// 重入顺带续一次租期,避免深层递归长时间不返回而临近过期
-		if _, rerr := m.backend.RenewSession(session); rerr != nil {
+		_, rerr := m.backend.RenewSession(session)
+		m.rec.NoteRenew(rerr)
+		if rerr != nil {
 			m.mu.Lock()
 			m.depth--
 			m.mu.Unlock()
 			return false, false, fmt.Errorf("lock/consulstore: 重入续期失败: %w", rerr)
 		}
+		m.rec.NoteAcquired(false)
 		return true, false, nil
 	}
 	m.mu.Unlock()
@@ -325,8 +373,10 @@ func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
 	}
 	if !ok {
 		if derr := m.backend.DestroySession(session); derr != nil {
+			m.rec.NoteBusy()
 			return false, true, fmt.Errorf("lock/consulstore: 锁被占用且会话销毁失败, 等待 TTL 回收: %w", derr)
 		}
+		m.rec.NoteBusy()
 		return false, true, nil
 	}
 
@@ -335,13 +385,21 @@ func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
 	m.heldOwner = owner
 	m.depth = 1
 	m.mu.Unlock()
+	m.rec.NoteAcquired(true)
 	m.wd.Start()
 	return true, false, nil
 }
 
-// renew 看门狗续期:以本轮会话调用 RenewSession。
-// 会话被 Consul 回收(过期/失效)时报 ErrLost,看门狗据此停止空转。
+// renew 看门狗续期入口:看门狗与手动 Refresh 同一口径记账。
 func (m *Mutex) renew(ctx context.Context) error {
+	err := m.renewOnce(ctx)
+	m.rec.NoteRenew(err)
+	return err
+}
+
+// renewOnce 看门狗续期:以本轮会话调用 RenewSession。
+// 会话被 Consul 回收(过期/失效)时报 ErrLost,看门狗据此停止空转。
+func (m *Mutex) renewOnce(ctx context.Context) error {
 	m.mu.Lock()
 	session, holding := m.sessionID, m.depth > 0
 	m.mu.Unlock()

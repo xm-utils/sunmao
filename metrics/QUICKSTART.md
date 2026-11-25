@@ -33,6 +33,7 @@ import (
     breakermetrics "github.com/xm-utils/sunmao/metrics/adapter/breaker"
     dlmetrics "github.com/xm-utils/sunmao/metrics/adapter/deadletter"
     kafkametrics "github.com/xm-utils/sunmao/metrics/adapter/kafka"
+    lockmetrics "github.com/xm-utils/sunmao/metrics/adapter/lock"
     rlmetrics "github.com/xm-utils/sunmao/metrics/adapter/ratelimit"
 )
 
@@ -40,6 +41,7 @@ metrics.Register(breakermetrics.NewFromManager(breaker.GetManager())) // 全部�
 metrics.Register(kafkametrics.New(consumer.GetMetrics(), "order-group"))
 metrics.Register(dlmetrics.New(queueMetrics))
 metrics.Register(rlmetrics.New(local))                                // *ratelimit.Local
+metrics.Register(lockmetrics.New(ddlMu, recoverMu))                   // 若干 lock.Statser（三端混用亦可）
 ```
 
 ## 4. 暴露 /metrics
@@ -61,6 +63,8 @@ curl -s localhost:9090/metrics | grep xmt_
 # xmt_breaker_requests_total{name="order-api",result="success"} 1024
 # xmt_kafka_consumer_messages_total{consumer="order-group"} 88
 # xmt_ratelimit_requests_total{key="api:order:create",result="rejected"} 12
+# xmt_lock_operations_total{backend="redis",key="sharding:ddl:orders",op="acquire",result="busy"} 7
+# xmt_lock_state{backend="redis",field="holding",key="sharding:ddl:orders"} 1
 # xmt_order_create_fail_total{code="500"} 3
 ```
 
@@ -72,3 +76,5 @@ curl -s localhost:9090/metrics | grep xmt_
 | Vec 构造报「至少需要一个 label 名」 | Vec 类型必须带 label；无 label 用 `NewGaugeFunc` 或原生 prometheus 构造 |
 | `/metrics` 里 `xmt_deadletter_*` 抓取报错 | Redis / 存储层未初始化，GetStats panic 已被兜底为抓取错误，先完成组件初始化 |
 | `xmt_ratelimit_*` 族缺失 | 该 `Local` 尚无真实判定（仅惰性创建不限流不记账），或已 `Close`（`Snapshots` 返回 nil） |
+| `xmt_lock_contention_ratio` 缺失 | 该锁至今未发起过获取尝试（计数族仍产出 0 值以便 `rate()` 推导，比例族无尝试时不产出）|
+| `xmt_lock_state{field="fence"}` 恒为 0 | `consulstore` 不提供栅栏 token（只有 Redis/Local 有），不是采集失败 |

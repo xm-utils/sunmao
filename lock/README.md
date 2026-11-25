@@ -20,6 +20,9 @@ lock/
 ├── owner.go                    # GoroutineOwner：进程前缀 + goroutine 标识（默认重入语义）
 ├── acquire.go                  # WaitAcquire/WaitAcquireSignal 轮询等待、Watchdog 续期（两端共用）
 ├── local.go                    # Local 进程内实现（零依赖，测试与单机部署）
+├── do.go                       # Do(ctx, mu, fn)：获取-执行-释放配对
+├── stats.go                    # Stats 快照、Statser 契约、Recorder 原子计数
+├── example_test.go             # 可运行示例（带 // Output: 断言，go test 即校验）
 ├── config.example.yaml         # 配置模板（装配层同构 struct）
 ├── redisstore/                 # Redis 后端：Lua 原子脚本 + PEXPIRE 租期 + 栅栏 token
 └── consulstore/                # Consul 后端：Session(TTL 租约) + KV Acquire/Release
@@ -38,7 +41,7 @@ lock/
 | 释放唤醒等待者 | ✅ 广播唤醒（不等轮询间隔） | ❌ 纯轮询 | ❌ 纯轮询 |
 | 单次获取开销 | 纳秒级内存加锁 | 1 次 Redis RTT（`EVALSHA`） | 首次 2 次 RTT（建会话 + Acquire），重入 0 次 |
 | ctx 传导 | 全程 | 全程（获取、释放、续期都吃 ctx） | **仅获取等待**：`consul` 组件客户端方法不吃 ctx |
-| 典型场景 | 单测、单机部署、同进程多 goroutine 初始化竞争 | 已有 Redis、需要栅栏 token 防旧持有者写入 | 已用 Consul 做注册中心、想少一套存储 |
+| 典型场景 | 单测、单机部署、同进程多 goroutine 初始化竞争 | 已有 Redis（单机/主从/Cluster/Failover）、需要栅栏 token 防旧持有者写入 | 已用 Consul 做注册中心、想少一套存储 |
 
 ### 选型策略
 
@@ -61,9 +64,27 @@ type Mutex interface {
 type Fencer interface { Fence() uint64 }              // 可选：栅栏 token（Local / redisstore）
 type Holder interface { Held() bool }                 // 可选：本地持有视图（三端）
 type Refresher interface { Refresh(ctx) error }       // 可选：手动续期（两服务端后端）
+type Statser interface { Stats() Stats }              // 可选：运行快照（三端，接 metrics 采集器）
 ```
 
-三个方法**一律不 panic**：后端异常、内部脚本返回值异常、回调 panic 全部 recover 后包成 error（仓库设计约定二）。判定一律用 `errors.Is`，不要比对字符串。
+契约方法**一律不 panic**：后端异常、内部脚本返回值异常、回调 panic 全部 recover 后包成 error（仓库设计约定二）。判定一律用 `errors.Is`，不要比对字符串。
+
+拿到契约后最省事的用法是 `Do`——它把「谁加锁谁解锁」收敛成一次调用，错误分支与 panic 都会归还锁：
+
+```go
+err := lock.Do(ctx, mu, func() error {
+    return ddl(ctx)             // 进不去就报 ErrTimeout/后端错误，fn 不会执行
+})
+```
+
+| 情形 | `Do` 的行为 |
+|---|---|
+| 获取失败 | 不执行 `fn`，错误原样返回（仍可 `errors.Is` 分出 `ErrTimeout` / ctx 取消）|
+| `fn` 返回错误 | 先释放再返回；释放也失败时 `errors.Join` 合并，**不拿释放错误覆盖业务错误** |
+| `fn` panic | 先释放再把 panic 原样抛回——这里 panic 的是调用方自己的临界区，不是锁的故障路径 |
+| 同 goroutine 嵌套 `Do` | 重入加深一层，内层出栈后外层仍持有 |
+
+周期任务「抢不到就本轮跳过」不要用 `Do`（它会排队），那种语义写 `TryLock` + `errors.Is(err, ErrBusy)`。
 
 错误语义（三后端一致）：
 
@@ -76,7 +97,7 @@ type Refresher interface { Refresh(ctx) error }       // 可选：手动续期�
 | 持锁期间租期到期被抢占 / 续期发现属主易主 | 同时包装 `ErrLost` 与 `ErrNotHeld`：临界区**可能已并发执行**，调用方应放弃本轮而非重试补偿 |
 | 后端故障（Redis 断开、Consul 不可达、脚本异常） | 透传后端 error（带 `lock/xxx:` 前缀），**绝不返回 nil**（fail-closed） |
 | `Close` 后继续使用 | 包装 `ErrClosed` |
-| 配置非法（空 `Key`、`RenewInterval >= TTL`、`PollInterval < 1ms` 等） | 构造期返回包装 `ErrInvalidConfig` 的 error |
+| 配置非法（空 `Key`、`TTL < 1ms`、`RenewInterval >= TTL`、`PollInterval < 1ms` 等） | 构造期返回包装 `ErrInvalidConfig` 的 error |
 
 ## Config
 
@@ -85,7 +106,7 @@ type Refresher interface { Refresh(ctx) error }       // 可选：手动续期�
 | 字段 | 默认 | 语义 |
 |---|---|---|
 | `Key` | 必填 | 锁标识，如 `sharding:ddl:orders_202611`；实际存储键由后端加前缀 |
-| `TTL` | 30s | 租期。持有者崩溃后最迟经此时长被抢占；`<=0` 取默认 |
+| `TTL` | 30s | 租期。持有者崩溃后最迟经此时长被抢占；`<=0` 取默认；**下限 1ms**（服务端以毫秒计时，亚毫秒租期会让加锁成为空操作，构造期即拒）|
 | `WaitTimeout` | 0（不限） | `Lock` 最长等待，仅受 ctx 之外的约束；超时报 `ErrTimeout` |
 | `PollInterval` | 100ms | 竞争重试间隔，内部加 **±25% 抖动**避免多副本同点风暴；下限 1ms |
 | `RenewInterval` | `TTL/3` | 看门狗续期间隔；`-1` 关闭自动续期（此后长任务必须自行周期调用 `Refresh`）；`>= TTL` 直接报错 |
@@ -110,6 +131,7 @@ defer mu.Unlock(ctx)
 mu.Held()   // 本 goroutine 视角是否持有
 mu.Depth()  // 重入深度
 mu.Fence()  // 单调递增栅栏值，释放后归零
+mu.Stats()  // 运行快照（争用、超时、释放计数），见「观测与指标」
 ```
 
 释放即唤醒等待者（`WaitAcquireSignal` 的广播渠道），因此 `PollInterval` 设得再大也不会让等待方空等；无远端 IO，`Close()` 恒返回 nil。
@@ -124,7 +146,7 @@ import (
 
 client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:6379"})  // 或由 redis 组件建立
 mu, err := redisstore.New(redisstore.Config{
-    Client: client,
+    Client: client,                                 // 接口类型：ClusterClient/Ring/UniversalClient 同可
     Config: lock.Config{Key: "deadletter:recover:order-pay", TTL: 30 * time.Second},
 })
 
@@ -135,6 +157,7 @@ err = mu.Refresh(ctx)                              // 手动续期（关闭看�
 fence := mu.Fence()                                // 栅栏 token，随每次真正获取单调递增
 left, err := mu.RemainingTTL(ctx)                  // 服务端剩余租期，观测/巡检用
 depth := mu.Depth()                                // 服务端记录的重入深度的本地视图
+st := mu.Stats()                                   // 运行快照（含 renewals/lost 计数）
 err = mu.Close()
 ```
 
@@ -143,6 +166,8 @@ err = mu.Close()
 - **获取**：空闲则 `HSET owner/depth=1` + `INCR` 栅栏 + `PEXPIRE`；同 owner 则 `HINCRBY depth 1` + `PEXPIRE`；他人持有返回 busy。全程原子，不存在「判完再写」的窗口。
 - **释放**：属主校验通过后深度减一，归零才 `DEL`。Key 不存在（租期已过）报 `ErrNotHeld`，属主易主报 `ErrLost`。
 - **续期**：属主校验通过才 `PEXPIRE`，否则报 `ErrLost` 并停看门狗。
+
+`Config.Client` 是接口而非 `*redis.Client`：只需 `redis.Scripter`（`Eval`/`EvalSha`/`ScriptExists`/`ScriptLoad`，`redis.NewScript.Run` 本身就收 Scripter）加一个 `PTTL`。因此 `*redis.Client`、`*redis.ClusterClient`、`*redis.Ring` 与 `redis.UniversalClient` 都能直接传入，包末尾有四个编译期断言钉住。若传入的是类型化空指针（`var c *redis.Client` 再赋给接口），构造期的 `Client == nil` 判不到，会到首次获取时由 `attempt` 的 recover 转成 error，不会 panic 逸出。
 
 ### consulstore Consul 后端
 
@@ -162,6 +187,7 @@ mu, err := consulstore.New(consulstore.Config{
 err = mu.Lock(ctx)
 sid := mu.SessionID()                               // 本轮会话 ID，排障时去 Consul 查会话状态
 kv := mu.KVKey()                                    // 实际 KV 键
+st := mu.Stats()                                    // 运行快照；本后端无栅栏，Fence 恒为 0
 err = mu.Unlock(ctx)
 err = mu.Close()
 ```
@@ -185,7 +211,48 @@ wd.Start(); defer wd.Stop()
 stop := wd.Tick(ctx)   // 测试可显式驱动，无需等待真实时间
 ```
 
-`Config.Normalize()` 与 `Config.CurrentOwner()` 也已导出，自定义后端复用电平化默认值与 Owner 求值规则，保证「换后端不换语义」。
+`Config.Normalize()` 与 `Config.CurrentOwner()` 也已导出，自定义后端复用同一套规范化默认值与 Owner 求值规则，保证「换后端不换语义」。
+
+## 观测与指标
+
+三端都实现了 `lock.Statser`，`Stats()` 只读本地快照（不发起后端请求、不加会与记账路径互等的锁），在临界区内调用同样安全：
+
+```go
+st := mu.Stats()
+fmt.Println(st)                                                     // 一行摘要，适合直接进日志
+fmt.Printf("争用率 %.2f 平均等待 %v\n", st.ContentionRatio(), st.AvgWait())
+```
+
+| 字段 | 口径 |
+|---|---|
+| `Attempts` / `Acquired` / `Reentered` / `Busy` | 获取侧：尝试轮次（轮询每轮各计一次）、首次获得、重入命中、撞锁 |
+| `Timeouts` / `Canceled` / `Lost` / `Errors` | 失败归类，与四个哨兵错误一一对应；ctx 自身取消走 `Canceled`，等到 `WaitTimeout` 走 `Timeouts` |
+| `Released` / `Decreased` / `ReleaseMisses` | 释放侧：深度归零、出栈但未放锁、被拒的释放 |
+| `Renewals` / `RenewFailures` | 续期侧，含看门狗、手动 `Refresh` 与 `consulstore` 重入顺带续期 |
+| `WaitNanos` / `Waits` / `HoldNanos` | 时长累计，配对 `AvgWait()` / `AvgHold()` 取均值；等到超时的回次也计等待，丢锁那一轮不计入持有 |
+| `Depth` / `Holding` / `Fence` / `Closed` | 读取那一刻的本地视图（服务端是否仍归本实例以下次操作结果为准）|
+
+计数字段自实例创建起累计，复位只能靠重建实例（与「一个 Key 一个常驻实例」的用法一致）。`Recorder` 也已导出：自定义后端内置它、在 attempt 与 API 边界记账，再导出一个 `Stats()` 就能接下面的采集器。
+
+接 Prometheus 走 `metrics/adapter/lock`（拉取式 Collector，`lock` 侧零依赖 `metrics`，被适配组件不改动）：
+
+```go
+import xmlock "github.com/xm-utils/sunmao/metrics/adapter/lock"
+
+c := xmlock.New(ddlMu, recoverMu)            // 若干 lock.Statser，后端混用亦可
+// 装配层已把锁收进注册表时：xmlock.NewWithProvider(func() map[string]lock.Stats { ... })
+metrics.RegisterExporter(c)
+```
+
+输出五个指标族，label 统一为 `(key, backend)`：
+
+| 指标 | 类型 | 额外 label |
+|---|---|---|
+| `xmt_lock_operations_total` | counter | `op=acquire/release/renew`、`result=…` |
+| `xmt_lock_errors_total` | counter | — |
+| `xmt_lock_duration_seconds_total` | counter | `phase=wait/hold`（秒）|
+| `xmt_lock_contention_ratio` | gauge | —（`Attempts=0` 时不产出）|
+| `xmt_lock_state` | gauge | `field=holding/depth/fence/closed` |
 
 ## 场景接入示范
 
@@ -255,13 +322,13 @@ func (m *QueueManager) recoverAndRetryLocked() error {
 
 | 组件 | 方式 |
 |---|---|
-| `redis` | 沿用其配置形态（addr/password/db）；因组件 `client` 未导出、全局 `Eval` 有 KEYS 双前缀问题，`redisstore` 直接接收使用方持有的 `*redis.Client` 执行脚本，**不改组件本体** |
+| `redis` | 沿用其配置形态（addr/password/db）；因组件 `client` 未导出、全局 `Eval` 有 KEYS 双前缀问题，`redisstore` 直接接收使用方自己的客户端（`redisstore.Client` 接口，组件建好的 `*redis.Client` 可直接传入）执行脚本，**不改组件本体** |
 | `consul` | `consulstore.Backend` 的方法集即 `*consul.Client` 的方法集（文件末尾有编译期断言，consul 侧改签名即编译失败），组件本体零改动 |
 | `gorm/database/sharding` | 启动期 DDL 串行化的目标场景。接入在装配层（sharding 零改动），见上文示范 |
 | `deadletter` | 多副本恢复去重的目标场景。同上，`StartRecovery` 的回调外包一层 `TryLock` |
 | `registry` / `registry/config` | 后续 `scheduler`（3.3.2）用本组件做「多实例仅一个执行」的选主原语；锁配置可由 `registry/config` 下发 |
 | `logging` | `OnRenewError` 回调接 `logging` 打告警级日志；`ErrLost` 出现必须显式记录——它意味着临界区可能已并发执行 |
-| `metrics` | 暂无适配器。锁的争用/续期计数若要上指标，按 `metrics/adapter/*` 手法在 metrics 侧加拉取式适配器（本组件保持零依赖 `metrics`） |
+| `metrics` | 已有 `metrics/adapter/lock` 拉取式采集器：把任意 `lock.Statser`（三端实例或自定义后端）交给 `New(...)` 即出 `xmt_lock_*` 指标，本组件保持零依赖 `metrics`，见「观测与指标」 |
 
 ## 测试
 
@@ -271,20 +338,28 @@ GOWORK=off go test -race -count=2 ./...
 ```
 
 - 根包：`Normalize` 默认值与全部非法值、`GoroutineOwner` 同/跨 goroutine 差异、`WaitAcquire` 重试成功/超时/ctx 透传/飞行中超时归类/attempt panic 隔离/异常返回检测/唤醒信号、`Watchdog.Tick` 四种错误语义表驱动 + 双 panic 隔离 + `Start/Stop` 幂等；
+- `Do`（`do_test.go`）：参数校验、临界区内持有且返回后释放、获取失败不执行 `fn`、业务错误不被释放错误覆盖（`errors.Join` 两边都可 `errors.Is`）、`fn` panic 仍归还锁且 panic 原样抛回、同 goroutine 嵌套重入；
 - `Local`：TryLock 互斥、同 goroutine 重入（栅栏值不变、深度 2）、跨 goroutine 释放被拒、释放即唤醒、等待超时、ctx 取消、已取消 ctx 下仍能释放、`Close` 复位与 `ErrClosed`、栅栏单调、两实例互不相知、静态 Owner 语义、32×20 并发临界区峰值恰为 1；
-- `redisstore`：基于 `miniredis` 离线运行，覆盖服务端字段/深度/栅栏断言、`FastForward` 驱动租期过期与抢占、看门狗续期延长 `PTTL`、篡改属主后 `Tick` 停轮并回 `ErrLost`、`Refresh` 手动续期、后端断开时 fail-closed、跨 goroutine 释放被拒而 `Close` 仍能归还、3 实例 36 并发峰值恰为 1；
-- `consulstore`：自建 `fakeBackend` 复刻 Session+KV 语义，覆盖会话惰性创建与销毁、busy 路径销毁临时会话、重入只加本地深度并顺带续期、会话 TTL 回收后被他副本抢占、`ReleaseLock` 被拒报 `ErrLost`、`DestroySession` 失败时「锁已释放」事实不变、Backend panic 一律转 error、跨 goroutine 释放被拒而 `Close` 仍能归还、3 副本 × 10 轮并发峰值恰为 1；
-- 两个场景用例（DDL、死信捞取）在三处各跑一遍，把「只执行一次 / 同一时刻只一个副本」的不变式钉成契约。
+- `redisstore`：基于 `miniredis` 离线运行，覆盖服务端字段/深度/栅栏断言、`FastForward` 驱动租期过期与抢占、看门狗续期延长 `PTTL`、篡改属主后 `Tick` 停轮并回 `ErrLost`、`Refresh` 手动续期、后端断开时 fail-closed、跨 goroutine 释放被拒而 `Close` 仍能归还、**在飞续期与释放互不等（`TestUnlockWithRenewInFlightDoesNotDeadlock`）**、`redis.UniversalClient` 走完整获取/释放与类型化空客户端转 error、3 实例 36 并发峰值恰为 1；
+- `consulstore`：自建 `fakeBackend` 复刻 Session+KV 语义，覆盖会话惰性创建与销毁、busy 路径销毁临时会话、重入只加本地深度并顺带续期、会话 TTL 回收后被他副本抢占、`ReleaseLock` 被拒报 `ErrLost`、`DestroySession` 失败时「锁已释放」事实不变、Backend panic 一律转 error、跨 goroutine 释放被拒而 `Close` 仍能归还、在飞续期与释放互不等、3 副本 × 10 轮并发峰值恰为 1；
+- 两个场景用例（DDL、死信捞取）在三处各跑一遍，把「只执行一次 / 同一时刻只一个副本」的不变式钉成契约；
+- 观测（`stats_test.go` 与两端 `stats_test.go`）：`Recorder` 失败归类（`ErrBusy` 不计错、`ErrLost` 作废持有时长）、`Local` 完整生命周期计数、`Attempts` 恒等式（8×25 并发下 `Attempts == Acquired+Reentered+Busy+异常轮次`）、三端 `Stats()` 的 backend/栅栏/续期口径、`Statser` 契约断言；
+- 示例（`example_test.go`、`redisstore/example_test.go`、`consulstore/example_test.go`）：全部带 `// Output:` 断言，由 `go test` 执行，覆盖重入与 Owner 策略、`Do` 的错误/panic 归还、TryLock 跳过、超时与 ctx 取消归类、栅栏单调、服务端过期与丢锁、`Stats()` 与 `Statser` 聚合、按可选接口探测后端能力——文档与行为同源，API 变了示例即失败。
 
 ## 已知边界与待办
 
 - **不做 Redlock 多节点算法**：`redisstore` 是单 Key（或同一 `{tag}` slot）方案，主从切换时理论上存在丢锁窗口。对强一致有要求的场景，用 `consulstore`（Raft 多数派）或等 `lock` 增加 `Multi` 聚合后端；
+- **Cluster 只做了接口层保证**：`redisstore.Client` 已接受 `*redis.ClusterClient`，锁 Key 的 `{tag}` 也能保证两个 Key 同 slot，但 `miniredis` 不支持 `CLUSTER` 命令，分片路由与MOVED 重定向未在用例里跑过——上 Cluster 前请用 3 节点实环境跑一次 DDL 场景；同理，`redis.Ring` 的一致性哈希由客户端控制，请确认 Key 真的落同一分片；
 - **等待不保证公平**：抖动轮询不排队，极端情况下某副本可能长时间抢不到。需要严格 FIFO 请自行用 Redis `BLPOP` 排队或在 `consul` 侧用 blocking query（后者不吃 ctx，取消语义会失真，故未采用）；
 - **`ErrLost` 只报告事实、不做补偿**：一旦出现说明临界区可能已并发执行，组件不会自动重跑，调用方必须按幂等设计任务；
 - **`Local` 无租期**：`TTL`/`RenewInterval` 只参与校验，持锁 goroutine 泄漏就永久阻塞同实例等待者——用它做初始化保护时要确保 `defer Unlock`；
 - **`consulstore` 无栅栏 token**：需要「旧持有者写入被拒」的场景请用 Redis，或等 `consul` 组件透出 `ModifyIndex`；
+- **Consul 服务端的 `session_ttl_min`（默认 10s）会抬高更小的 TTL**：把 `TTL` 配成 3s 并不会让崩溃回收变快，实际租约由服务端参数决定——要调快回收请改 Consul 的 `session_ttl_min`，而不是组件配置；
+- **`redisstore` 的栅栏计数 Key 常驻**：`xm_lock:{key}:fence` 不过期也不删除（单调性所需），每个锁 Key 对应一个极小 Key；动态创建海量锁 Key 的场景需自行回收；
+- **`consulstore` 等待期间每轮尝试建/销一次会话**：会话创建是 Raft 写，长时间 `Lock` 等待应上调 `PollInterval`（默认 100ms 对分钟级等待仍偏激进），能接受跳过就优先 `TryLock`；
 - **`redisstore` 每次获取一个 RTT**：跨机房部署时轮询等待会放大抖动，建议 `PollInterval` 上调（默认 100ms 起）并优先 `TryLock` 跳过；
-- 待办：`metrics/adapter/lock`（争用与续期计数）、`scheduler`（3.3.2）落地后把「选主执行」的锁调用收进调度器、`mq/redis/stream` pending 巡检启用时接入本组件。
+- **计数是累计值而非区间值**：`Stats()` 与 `xmt_lock_contention_ratio` 反映实例创建至今的总账，需要区间竞争率请对 `xmt_lock_operations_total` 做 `rate()` 推导；重启进程即归零，多副本聚合看指标时记得按 `instance` 维度分开；
+- 待办：`scheduler`（3.3.2）落地后把「选主执行」的锁调用收进调度器、`mq/redis/stream` pending 巡检启用时接入本组件。
 
 ## 许可
 
