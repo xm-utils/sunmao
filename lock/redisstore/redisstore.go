@@ -2,8 +2,10 @@
 // SetNX 语义的互斥锁 + Owner 属主校验 + 服务端深度计数,多实例共享同一把锁。
 //
 // 复用仓库 redis 组件的方式与 ratelimit/redisstore 一致:连接管理沿用其
-// InitRedisCache(配置/连接池/健康检查归组件),本包接收其管理的 *redis.Client
+// InitRedisCache(配置/连接池/健康检查归组件),本包接收使用方交来的客户端
 // 直接执行脚本——组件全局方法存在 KEYS 前缀等问题,不走全局函数。
+// 客户端以 Client 接口(最小能力集)传入,单机/Cluster/Sentinel/环形的
+// 任一 go-redis 客户端都能直接用。
 //
 // 三个动作(获取/释放/续期)全部由 Lua 脚本在服务端原子执行,消除
 // 「读到属主 → 判断 → 写回」的竞态窗口;临界区判定完全依赖脚本返回值。
@@ -114,15 +116,40 @@ var (
 // Config Redis 后端锁配置。内嵌的 lock.Config 字段(Key/TTL/Owner 等)
 // 与本结构同层参与 yaml 反序列化,键位见 ../config.example.yaml。
 type Config struct {
-	// Client 由 redis 组件 InitRedisCache 建立(或同等来源)的客户端,必填
-	Client *redis.Client
+	// Client Redis 能力集,必填。redis 组件 InitRedisCache 建好的 *redis.Client 可直接传入;
+	// 为支持 Cluster/Failover 部署,字段类型是最小能力集 Client 而非具体客户端类型
+	// (*redis.ClusterClient / *redis.Ring / redis.UniversalClient 同样满足)。
+	Client Client
 	lock.Config
 }
+
+// Client 是 Redis 后端所需的最小能力集:
+//   - redis.Scripter:Eval / EvalSha / ScriptExists / ScriptLoad——redis.NewScript.Run
+//     本身就收 Scripter,三个动作的原子判定全靠它;
+//   - PTTL: RemainingTTL 读服务端剩余租期(观测/巡检)。
+//
+// 为什么抽这一层:锁状态 Hash 与栅栏计数 Key 同用 {tag},两者落同一 slot,
+// Cluster 下 EVALSHA 与脚本内命令不跨槽——但把入参钉死为 *redis.Client 会让
+// 这份承诺用不出来。接口化后 *redis.Client / *redis.ClusterClient / *redis.Ring
+// 与 redis.UniversalClient 都能直接传入(文件末尾有编译期断言)。
+type Client interface {
+	redis.Scripter
+	PTTL(ctx context.Context, key string) *redis.DurationCmd
+}
+
+// 编译期断言:三类具体客户端与 UniversalClient 都满足 Client。
+// go-redis 侧改方法签名时此处即编译失败,而不是等到运行期才报传不进。
+var (
+	_ Client = (*redis.Client)(nil)
+	_ Client = (*redis.ClusterClient)(nil)
+	_ Client = (*redis.Ring)(nil)
+	_ Client = (redis.UniversalClient)(nil)
+)
 
 // Mutex Redis 后端分布式锁,实现 lock.Mutex(附 lock.Fencer / lock.Holder)。
 // 本地只缓存属主视图(深度、栅栏值)以支持 Held/Fence 零 RTT,判定一律以服务端为准。
 type Mutex struct {
-	client   *redis.Client
+	client   Client
 	cfg      lock.Config
 	hashKey  string
 	fenceKey string
@@ -145,6 +172,8 @@ var (
 
 // New 创建 Redis 锁;配置非法返回包装 lock.ErrInvalidConfig 的 error,不 panic。
 // Client 必填,故不做参数 Option,统一在构造期校验。
+// 注意:若传入的是类型化空指针(如 var c *redis.Client),此处判不到——
+// 到首次获取时由 attempt 的 recover 转成 error,不会 panic 给调用方。
 func New(cfg Config) (*Mutex, error) {
 	if cfg.Client == nil {
 		return nil, fmt.Errorf("%w: Client 不能为 nil", lock.ErrInvalidConfig)

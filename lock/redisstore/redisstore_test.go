@@ -72,6 +72,60 @@ func TestNewValidatesConfig(t *testing.T) {
 	}
 }
 
+// TestClientInterfaceAcceptsConcreteClients 钉住 Client 接口化后的可传入性:
+// 具体客户端、Cluster/Ring 与 UniversalClient 都满足 Client(文件末尾有编译期断言),
+// 行为上再以 redis.UniversalClient 走一轮完整的获取/释放。
+func TestClientInterfaceAcceptsConcreteClients(t *testing.T) {
+	mr := miniredis.RunT(t)
+	var client Client = redis.NewUniversalClient(&redis.UniversalOptions{Addrs: []string{mr.Addr()}})
+
+	m, err := New(Config{Client: client, Config: lock.Config{Key: "test:lock", Owner: "worker-1"}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = m.Close() }()
+
+	ctx := context.Background()
+	if err := m.TryLock(ctx); err != nil {
+		t.Fatalf("UniversalClient 下 TryLock: %v", err)
+	}
+	if got := mr.HGet("xm_lock:{test:lock}", "owner"); got != "worker-1" {
+		t.Errorf("服务端 owner=%q, 期望 worker-1", got)
+	}
+	if left, err := m.RemainingTTL(ctx); err != nil || left <= 0 {
+		t.Errorf("UniversalClient 下 RemainingTTL 应可用, 实际 %v(err=%v)", left, err)
+	}
+	if err := m.Unlock(ctx); err != nil {
+		t.Fatalf("UniversalClient 下 Unlock: %v", err)
+	}
+	if mr.Exists("xm_lock:{test:lock}") {
+		t.Error("释放后锁 Key 应消失")
+	}
+
+	// 组件建好的 *redis.Client 仍可直接传入(源码兼容, 无需改调用点)
+	h := newHarness(t)
+	var plain Client = h.client
+	if _, err := New(Config{Client: plain, Config: lock.Config{Key: "test:lock"}}); err != nil {
+		t.Fatalf("*redis.Client 传入应成立: %v", err)
+	}
+}
+
+// TestTypedNilClientBecomesError 保证「接口里装了类型化空指针」这类
+// 构造期判不出的误用不会以 panic 形式逃逸(设计约定二)。
+func TestTypedNilClientBecomesError(t *testing.T) {
+	var typed *redis.Client // 非 nil 接口值: New 的 nil 判不到
+	m, err := New(Config{Client: typed, Config: lock.Config{Key: "test:lock"}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := m.TryLock(context.Background()); err == nil {
+		t.Fatal("空客户端不得假装获得锁")
+	} else if errors.Is(err, lock.ErrBusy) {
+		t.Errorf("误用应报后端异常而非 ErrBusy: %v", err)
+	}
+}
+
 func TestAcquireWritesServerState(t *testing.T) {
 	h := newHarness(t)
 	m := h.newMutex(t, "replica-a", lock.Config{TTL: 30 * time.Second})

@@ -8,12 +8,15 @@
 //
 // 契约只有一个接口 Mutex(Key 维度一实例),换后端换构造器、业务代码不动一行:
 //
-//	redisstore.New(redisstore.Config{Client: rc, Key: "deadletter:recover"})
-//	consulstore.New(consulstore.Config{Backend: consulClient, Key: "sharding:ddl:orders"})
+//	redisstore.New(redisstore.Config{Client: rc, Config: lock.Config{Key: "deadletter:recover"}})
+//	consulstore.New(consulstore.Config{Backend: consulClient, Config: lock.Config{Key: "sharding:ddl:orders"}})
 //	lock.New(lock.Config{Key: "job:report"})               // 进程内, 测试与单机部署
 //
 // 租期(TTL)与看门狗续期、try-lock、阻塞获取、Context 取消感知、同 Owner 可重入
 // 在本包以 Config 统一表达,各后端语义一致;差异写在各包 README 的「后端差异」表。
+//
+// 需要「加锁-执行-解锁」配对时用 Do(ctx, mu, fn)——它保证错误分支与 panic
+// 都不会把锁漏在半路;周期任务「抢不到就跳过」仍应自己写 TryLock。
 //
 // 本包只依赖标准库:进程内实现与契约零仓外依赖,Redis/Consul 后端在子包按需引入。
 package lock
