@@ -159,7 +159,10 @@ metrics.Register(rlmetrics.NewWithProvider(fn))   // 自定义快照源：多后
 ## 开发状态
 
 - `github.com/xm-utils/sunmao/trace` 尚未发布 tag，`go.mod` 中临时 `replace ../trace`（经 mq/kafka 间接依赖）；trace 发版后删除该 replace 并转 pseudo-version。
-- `github.com/xm-utils/sunmao/ratelimit` 亦未发 tag：`go.mod` 以 pseudo-version 引用（不留 replace），适配器依赖其 `Local.Snapshots` / `KeySnapshot`，需该代码合入后重新 `go mod tidy` 方能取到；ratelimit 发版后可转正式 tag。
+- `github.com/xm-utils/sunmao/ratelimit` 亦未发 tag：`go.mod` 以 pseudo-version 引用（不留 replace），
+  当前指向含 `Local.Snapshots` / `KeySnapshot` 的 `1728355`，`GOWORK=off` 可独立构建；
+  ratelimit 接口后续变更时，需先 `go get github.com/xm-utils/sunmao/ratelimit@<commit>` 再 tidy
+  （tidy 仅保证 import 可解析，不会自动升级已有 requirement）；ratelimit 发版后可转正式 tag。
 - 本模块未打 tag；接口冻结后发布 `metrics/v0.1.0`。
 
 ## 测试

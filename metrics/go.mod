@@ -9,7 +9,7 @@ require (
 	github.com/xm-utils/sunmao/breaker v0.0.2
 	github.com/xm-utils/sunmao/deadletter v0.0.1
 	github.com/xm-utils/sunmao/mq/kafka v0.0.1
-	github.com/xm-utils/sunmao/ratelimit v0.0.0-20261125090906-ba434f0f3e6c
+	github.com/xm-utils/sunmao/ratelimit v0.0.0-20261125143930-172835522100
 	github.com/xm-utils/sunmao/redis v0.0.2
 )
 
