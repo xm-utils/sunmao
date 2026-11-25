@@ -1,0 +1,10 @@
+node_modules/
+.vitepress/cache/
+.vitepress/dist/
+
+# 以下均为 sync-docs 生成物，唯一真源在 tools 仓
+docs/
+.vitepress/modules.json
+guide/modules.md
+guide/dependencies.md
+changelog.md
