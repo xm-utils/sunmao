@@ -91,6 +91,23 @@ ratelimit:
       header: "X-Tenant-Id"    # dimension=header 时读取的请求头；取不到则回退 path
       fail_open: false
 
+  # ==================== 拒绝率告警联动（ratelimit/alert） ====================
+  # → alert.Config{Threshold, MinRequests, Interval, Cooldown}；
+  #   Snapshots 固定传 local.Snapshots，OnAlert 由装配层接 breaker 告警出口（回调不可由 YAML 表达）。
+  # 留空/非法值由组件回落括号内默认；enabled=false 时不启巡检协程。
+  alert:
+    enabled: true
+    threshold: 0.8           # 区间拒绝率阈值（0~1），>1 或 <=0 取 0.8
+    min_requests: 10         # 单 Key 区间内最小判定样本数，<=0 取 10
+    interval: 10s            # 巡检间隔，<=0 取 10s（与 breaker AlertManager 节奏一致）
+    cooldown: 5m             # 同 Key 两次告警最小间隔，<=0 取 5m（防告警风暴）
+
+  # ==================== 指标出口（metrics/adapter/ratelimit） ====================
+  # 适配器在 metrics 侧，不属本组件配置；此处仅约定装配开关：
+  # enabled=true 时调 metrics.Register(rlmetrics.New(local)) → xmt_ratelimit_*
+  metrics:
+    enabled: true
+
 # ==================== 加载示例（装配层） ====================
 # package main
 #
@@ -161,4 +178,8 @@ ratelimit:
 #     // 3) backend=redis 时改用 redisstore.New(...)，得到的 Limiter 可直接替换中间件 Config.Limiter
 #     // 4) KeyFunc 按 middleware.*.dimension 生成：
 #     //    method/path → 传 nil 走组件缺省；header → 从 metadata / r.Header 取值，取不到返回 "" 即直通
+#     // 5) 观测与告警（可选）：
+#     //    metrics.Register(rlmetrics.New(local))                             // xmt_ratelimit_*
+#     //    w, _ := alert.New(alert.Config{Snapshots: local.Snapshots, ...})   // 拒绝率超阈值
+#     //    go w.Start(ctx)                                                    // 事件进 breaker 告警通道
 # }

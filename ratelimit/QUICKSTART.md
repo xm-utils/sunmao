@@ -122,7 +122,7 @@ rl, err := redisstore.New(redisstore.Config{
     Client: client,
     Key:    "api:order:create",    // 实际落库 xm_ratelimit:{api:order:create}，Cluster 下单 slot
     Rate:   100,
-    Burst:   200,
+    Burst:  200,
 })
 // rl 满足 ratelimit.Limiter，可直接替换上面所有装配点的 Limiter 字段
 ```
@@ -142,6 +142,53 @@ func onRuleChanged(key string, rate, burst float64) error {
 }
 ```
 
+## 7. 观测与告警联动
+
+`Local` 内置按 Key 的判定计数（只记真实判定：放行与限流拒绝；ctx 取消、后端故障、参数错误不计），一次 `Snapshots()` 拿到全部快照：
+
+```go
+for key, s := range local.Snapshots() {
+    // s.Total 累计判定数 / s.Rejected 累计拒绝数
+    // s.Remaining 当前令牌水位 / s.Limit 当前生效速率
+    _ = key
+}
+```
+
+**接进统一指标出口**（拉取式适配器，`ratelimit` 本体零依赖 `metrics`）：
+
+```go
+import rlmetrics "github.com/xm-utils/sunmao/metrics/adapter/ratelimit"
+
+metrics.Register(rlmetrics.New(local))   // 产出 xmt_ratelimit_requests_total 等
+```
+
+**拒绝率超阈值走 `breaker` 告警通道**（`alert` 子包，breaker 本体零改动）：
+
+```go
+import (
+    "github.com/xm-utils/sunmao/breaker"   // 告警事件模型来源（告警级别/字段）
+    "github.com/xm-utils/sunmao/ratelimit/alert"
+)
+
+w, err := alert.New(alert.Config{
+    Snapshots:   local.Snapshots,           // 差分两次采样算"区间拒绝率"
+    Threshold:   0.8,                       // 超 80% 告警
+    MinRequests: 10,                         // 区间样本量下限，防小样本误报
+    Interval:    10 * time.Second,
+    Cooldown:    5 * time.Minute,           // 同 Key 冷却期，防告警风暴
+    OnAlert: func(ev *breaker.AlertEvent) {  // 事件即 breaker 的告警模型，可直接透传
+        log.Warnf("[限流告警] %s - %s", ev.CircuitName, ev.Message)
+    },
+})
+if err != nil {
+    return err
+}
+go w.Start(ctx)   // 阻塞式巡检，ctx 取消或 w.Close() 即退出；也可自行按周期调 w.Check()
+defer w.Close()
+```
+
+首次采样只记基线不告警；事件 `CircuitName` 带 `ratelimit:` 前缀，与同通道内的熔断器告警区分来源。
+
 ## 常见错误
 
 | 现象 | 原因 |
@@ -153,3 +200,5 @@ func onRuleChanged(key string, rate, burst float64) error {
 | 明明配了 100 QPS，线上像 1000 | 多实例各自用 `Local`（进程内份额），需换 `redisstore` |
 | `ratelimit: closed` | 限流器已 `Close`；`redisstore.Close` 只停本实例，不动 Redis 共享状态 |
 | 单测里放行数量飘忽 | 未注入假时钟 `Clock`；并发用例应冻结时钟后严格断言放行数 = `Burst`/`Limit`/`Queue` |
+| `xmt_ratelimit_*` 无样本 | 该 Key 从未发生过真实判定（仅 `Limiter()` 惰性创建不记账），或 `Local` 已 `Close`（`Snapshots` 返回 nil） |
+| 告警始终不触发 | `alert.Watcher` 首轮只记基线；或区间样本数未达 `MinRequests`；或仍在 `Cooldown` 期内 |

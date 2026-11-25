@@ -5,8 +5,8 @@
 与 `breaker` 的分工：`breaker` 是"被动逃生"（依赖已劣化才熔断），本组件是"主动防护"——入口流量超标时保护自身，出口调用时约束自我频率。
 
 - 模块路径：`github.com/xm-utils/sunmao/ratelimit`
-- 依赖策略：**根包零仓外依赖**（只用标准库）；`google.golang.org/grpc` 只进 `grpcmiddleware` 子包，`go-redis/v8` 只进 `redisstore` 子包，纯本地限流场景不会被拖入重依赖链
-- 兼容策略：`grpcx` / `httpclient` / `redis` 组件本体**零改动**，接入一律经本组件子包适配器
+- 依赖策略：**根包零仓外依赖**（只用标准库）；`google.golang.org/grpc` 只进 `grpcmiddleware` 子包，`go-redis/v8` 只进 `redisstore` 子包，`breaker`（仅取告警事件模型）只进 `alert` 子包，纯本地限流场景不会被拖入重依赖链
+- 兼容策略：`grpcx` / `httpclient` / `redis` / `breaker` 组件本体**零改动**，接入一律经本组件子包适配器（指标侧走 `metrics/adapter/ratelimit`，本组件零依赖 `metrics`）
 
 ## 目录结构
 
@@ -16,9 +16,10 @@ ratelimit/
 ├── token_bucket.go                # TokenBucket 令牌桶（默认算法，懒回填）
 ├── sliding_window.go              # SlidingWindow 滑动窗口（精确计数）
 ├── leaky_bucket.go                # LeakyBucket 漏桶（匀速整形，含 Reserve/Wait）
-├── local.go                       # Local 本地内存后端（按 Key 惰性创建，多维限流）
+├── local.go                       # Local 本地内存后端（按 Key 惰性创建，多维限流 + 判定计数快照）
 ├── config.example.yaml            # 配置模板（装配层同构 struct）
 ├── redisstore/                    # Redis 后端：Lua 脚本原子扣减，多实例共享份额
+├── alert/                         # 拒绝率告警巡检：差分快照超阈值 → breaker 告警通道
 ├── grpcmiddleware/                # gRPC 一元/流服务端拦截器
 └── httpmiddleware/                # net/http Handler 包装（Gin 经 gin.WrapH 装配）
 ```
@@ -164,13 +165,28 @@ limiter, err := local.Limiter("api:order:create")   // 拿到 *TokenBucket 满�
 
 err = local.Update("api:order:create", 50, 100)     // 热更新；Key 不存在则按新参数创建
 err = local.Remove("api:order:create")              // 规则删除
-res := local.Stats("api:order:create")              // 快照；Key 不存在返回零值
+res := local.Stats("api:order:create")              // 令牌快照；Key 不存在返回零值
+snaps := local.Snapshots()                          // 全部已判定 Key 的计数 + 水位快照
 err = local.Close()                                 // 关闭全部限流器
 ```
 
 Key 由使用方拼接，天然支撑接口级（`api:xxx`）、服务级、租户级（`tenant:xxx`）多维组合；空 Key 报 `ErrInvalidConfig`（入口中间件把"空串"用作直通约定，见下）。双检锁惰性创建，同 Key 恒定复用一个限流器。
 
-> `Local` 惰性创建的是 `TokenBucket`，`Update` 也只接受令牌桶参数；需要按 Key 用滑窗/漏桶时，自行持有 `*SlidingWindow` / `*LeakyBucket`  map（见「已知边界」）。
+**判定计数**：`Allow` / `AllowN` 会按 Key 累计 `Total`（判定次数）与 `Rejected`（限流拒绝次数），只记**真实判定**——ctx 取消、后端故障、`n<=0` 等参数错误一律不记账，避免污染拒绝率差分。快照形态：
+
+```go
+type KeySnapshot struct {
+    Key       string
+    Total     int64   // 累计判定次数（进程启动以来）
+    Rejected  int64   // 累计被限流拒绝次数
+    Remaining float64 // 当前可用令牌数
+    Limit     float64 // 当前生效速率（个/秒）
+}
+```
+
+`Snapshots()` 实时拉取，是 `metrics/adapter/ratelimit` 与 `alert.Watcher` 的唯一数据来源；`Local` 已 `Close` 时返回 `nil`（不报错）。计数为**累计值**，区间速率需差分（`alert` 已代劳）。
+
+> `Local` 惰性创建的是 `TokenBucket`，`Update` 也只接受令牌桶参数；需要按 Key 用滑窗/漏桶时，自行持有 `*SlidingWindow` / `*LeakyBucket`  map（见「已知边界」），观测侧可用 `adapter.NewWithProvider` 自备快照源。
 
 ### redisstore Redis 后端
 
@@ -271,6 +287,61 @@ handler = mw(mux)
 - 后端故障默认 `500`，`FailOpen: true` 放行；
 - `KeyFunc` 返回空串 = 直通不查限流器（不会为该请求创建 Key）。
 
+### alert 拒绝率告警联动（breaker 告警通道）
+
+`breaker` 已有的 `AlertManager`（`alert.go`）具备完整告警出口（分级日志 + `AlertCallback`），但其监控对象只能是熔断器实例。本包把限流快照接到该通道：周期差分 `Local.Snapshots()`，某 Key 在巡检间隔内的**区间拒绝率**超阈值即产出 `breaker.AlertEvent`（本体零改动，适配写在本包）。
+
+```go
+import "github.com/xm-utils/sunmao/ratelimit/alert"
+
+w, err := alert.New(alert.Config{
+    Snapshots:   local.Snapshots,        // 必填，快照源
+    Threshold:   0.8,                    // 区间拒绝率阈值，<=0 或 >1 取 0.8
+    MinRequests: 10,                      // 区间样本量下限，<=0 取 10
+    Interval:    10 * time.Second,       // 巡检间隔，<=0 取 10s
+    Cooldown:    5 * time.Minute,        // 同 Key 冷却期，<=0 取 5min
+    OnAlert:     func(ev *breaker.AlertEvent) { /* 透传 breaker 告警出口 */ },
+    OnPanic:     func(r any) { /* 快照源/回调 panic 通知 */ },
+    Clock:       nil,                    // 冷却期时间源，nil 用 SystemClock
+})
+
+go w.Start(ctx)   // 阻塞至 ctx 取消或 Close；需要手动节奏可只调 w.Check()
+err = w.Close()   // 幂等，等待监控协程退出
+```
+
+行为要点（均与 `breaker.AlertManager` 对齐）：
+
+- **首次采样只记基线不告警**：无差分可用；Key 从快照消失会清理其基线，再现时重新记基线；
+- **区间而非累计**：告警消息里的判定/拒绝数是两次采样之差，示例 `限流拒绝率 100.00% 超过阈值 80.00%(区间判定 20, 拒绝 20)`；
+- **冷却期防风暴**：同 Key 在 `Cooldown` 内不重复告警，不同 Key 互不影响；
+- **计数回拨免疫**：使用方重置导致 `Total`/`Rejected` 回退时按新基线处理，本轮不误报；
+- **来源标识**：`CircuitName` 形如 `ratelimit:api:order:create`，`Level` 固定 `AlertLevelError`，与同通道内熔断器告警可区分；
+- **panic 安全**：快照源 panic 被隔离为本轮跳过，`OnAlert` 回调 panic 转 `OnPanic`，监控协程不崩溃；
+- `Start` 需由调用方放入 goroutine（与 `breaker` 的 `StartMonitoring` 内部自启不同），便于纳入统一生命周期与优雅停机；
+- 本包只引入 `breaker` 依赖，不影响根包零依赖特性（不 import `alert` 的子包使用方不会被拖入 `breaker`/`logrus`，Go 按包粒度构建）。
+
+### 指标出口接入（metrics 适配器）
+
+埋点在 `metrics/adapter/ratelimit`（拉取式 `prometheus.Collector`，本组件零依赖 `metrics`）：
+
+```go
+import rlmetrics "github.com/xm-utils/sunmao/metrics/adapter/ratelimit"
+
+metrics.Register(rlmetrics.New(local))              // 本地后端
+metrics.Register(rlmetrics.NewWithProvider(fn))     // 自定义快照源（多后端聚合/自持实例）
+```
+
+| 指标 | 类型 | label |
+|---|---|---|
+| `xmt_ratelimit_requests_total` | counter | `key`, `result=allowed\|rejected` |
+| `xmt_ratelimit_rejection_rate` | gauge | `key`（累计拒绝率，区间值请对计数做 `rate()`） |
+| `xmt_ratelimit_tokens_available` | gauge | `key` |
+| `xmt_ratelimit_rule_rate` | gauge | `key`（当前生效速率） |
+
+仅含发生过真实判定的 Key；`Total=0` 时只产出计数零值，不产出拒绝率/水位（避免零除与误导）。快照源 panic 经 `InvalidMetric` 兜底为抓取错误，不击穿 `/metrics`。
+
+> `redisstore` 无内存快照（状态在 Redis 侧），需其指标请按 Key 调 `Peek()` 自行组装 `NewWithProvider`，或在入口中间件层埋点。
+
 ## 配置与热更新
 
 配置模板见 [config.example.yaml](config.example.yaml)（装配层同构 struct 的键位说明与加载示例）。本组件**不内置 YAML 解析与配置源监听**，以保持根包零依赖：
@@ -286,8 +357,8 @@ handler = mw(mux)
 | `redis` | 可沿用其配置形态（host/password/dbNum）；因组件 `client` 未导出且全局 `Eval` 有 KEYS 双前缀缺陷，`redisstore` 直接接收使用方持有的 `*redis.Client` 执行脚本，不改组件本体 |
 | `grpcx` | 拦截器经标准 `grpc.ServerOption` 拼装，`grpcx` 零改动（ROADMAP 第四阶段若落地 `WithRateLimit` 一行装配，再评估收编本子包入口） |
 | `httpclient` | 出口自我限速用 `LeakyBucket.Wait(ctx, n)` 包住调用；`httpclient` 本体零改动 |
-| `breaker` | 分工互补：本组件主动拒、`breaker` 被动熔断。被限流拒绝率超阈值 → 联动 `breaker` 告警通道（`alert.go`）尚未实现，属待办 |
-| `metrics` | 拒绝数/剩余水位尚未埋点，待按 `metrics/adapter/*` 拉取式适配器手法补 |
+| `breaker` | 分工互补：本组件主动拒、`breaker` 被动熔断。**已联动**：`alert` 子包差分拒绝率快照，超阈值产出 `breaker.AlertEvent` 进其告警通道；降级兜底可直接复用 `breaker` 的 `FallbackFunc` 体系 |
+| `metrics` | **已接入**：`metrics/adapter/ratelimit` 拉取式适配器读 `Local.Snapshots`，产出 `xmt_ratelimit_*`；本组件零依赖 `metrics`，根包零依赖不变 |
 | `registry/config` | 限流规则热更新的配置源，监听后调 `Local.Update` |
 
 ## 测试
@@ -300,7 +371,8 @@ GOWORK=off go test -race -count=2 ./...
 - 全部算法/后端用例注入假时钟，窗口滑动与令牌回填完全确定化，不依赖真实时间；
 - 并发用例冻结时钟并严格断言放行数量恰等于 `Burst` / `Limit` / `Queue`（不超放也不漏放）；
 - `redisstore` 基于 `miniredis` 离线运行，覆盖双 client 共享份额、`NOSCRIPT` 回落、TTL 过期、后端宕机的 error 传播（不 panic）；
-- 中间件用例覆盖超限拒绝码、trailer/header、`FailOpen`、直通 Key。
+- 中间件用例覆盖超限拒绝码、trailer/header、`FailOpen`、直通 Key；
+- `alert` 用例覆盖首轮基线不告警、阈值/样本量边界、冷却期、计数回拨与 Key 消失、回调/快照源 panic 隔离、并发 `Check`（`-race`）。
 
 ## 已知边界与待办
 
@@ -308,7 +380,9 @@ GOWORK=off go test -race -count=2 ./...
 - **Redis 后端只有令牌桶**：滑窗/漏桶尚无 Lua 实现，多实例全局配额需精确计数时暂用"令牌桶 + 合理 Burst"近似；
 - **`redisstore` 每次判定一个 RTT**：热点接口建议本地 `Local` 先挡一层，或按 `Key` 分片降低单 Key 争用；
 - **时钟回拨防御是"不倒扣"而非"回滚"**：跨实例存在时钟漂移时，各实例独立钳制，不追求绝对一致；
-- 待办：`metrics` 适配器与拒绝率告警联动、`breaker` 告警通道打通、README 所述算法的 Redis 后端扩展。
+- **计数不跨进程**：`Local` 的判定计数与告警巡检均为单进程视图，多副本需各自部署 `alert.Watcher`（或改用指标侧 `rate()` 做聚合告警）；
+- **告警不自动接 `breaker.AlertManager`**：`AlertManager.RegisterBreaker` 只接熔断器实例，本包产出事件由使用方透传至实际出口（webhook / IM / 日志），避免反向侵入熔断器监控循环；
+- 待办：规则热更新的配置源监听装配（`registry/config.Watch` → `Local.Update`）、`redisstore` 侧指标快照、滑窗/漏桶的 Redis 后端。
 
 ## 许可
 

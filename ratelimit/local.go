@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -18,11 +19,29 @@ type LocalConfig struct {
 
 // Local 本地内存限流后端(单实例):按 Key 惰性创建并复用 TokenBucket,
 // 天然支撑接口级/服务级/租户级等多维限流(Key 由使用方拼接,如 "api:order:create")。
+// 判定结果按 Key 累计计数,经 Snapshots 供观测(metrics 适配器与告警巡检拉取)。
 type Local struct {
 	mu      sync.RWMutex
 	cfg     LocalConfig
 	buckets map[string]*TokenBucket
+	counts  map[string]*keyCount
 	closed  bool
+}
+
+// keyCount 单 Key 判定计数(与 buckets 同锁保护)
+type keyCount struct {
+	total    int64
+	rejected int64
+}
+
+// KeySnapshot 单 Key 的观测快照:累计计数 + 当前令牌水位。
+// 计数为进程启动以来累计值(非滑动窗口值),速率类判定请对两次采样做差分。
+type KeySnapshot struct {
+	Key       string
+	Total     int64   // 累计判定次数(放行+拒绝,不含配置错误/后端故障/ctx 取消)
+	Rejected  int64   // 累计被限流拒绝次数
+	Remaining float64 // 当前可用令牌数(Key 已移除时为 0)
+	Limit     float64 // 当前速率(个/秒)
 }
 
 // NewLocal 创建本地内存后端;配置非法返回包装 ErrInvalidConfig 的 error,不 panic。
@@ -34,6 +53,7 @@ func NewLocal(cfg LocalConfig) (*Local, error) {
 	return &Local{
 		cfg:     cfg,
 		buckets: make(map[string]*TokenBucket),
+		counts:  make(map[string]*keyCount),
 	}, nil
 }
 
@@ -83,7 +103,12 @@ func (l *Local) Allow(ctx context.Context, key string) error {
 	if err != nil {
 		return err
 	}
-	return b.Allow(ctx)
+	err = b.Allow(ctx)
+	// 仅对真实判定记账:ctx 取消/后端故障等非判定结果不计入,避免污染拒绝率差分
+	if err == nil || errors.Is(err, ErrRateLimited) {
+		l.record(key, errors.Is(err, ErrRateLimited))
+	}
+	return err
 }
 
 // AllowN 指定 Key 的一次消耗 n 个令牌判定
@@ -92,7 +117,28 @@ func (l *Local) AllowN(ctx context.Context, key string, n int) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return b.AllowN(ctx, n)
+	ok, err := b.AllowN(ctx, n)
+	// AllowN 被拒为 (false, nil),按结果记账;后端/参数错误不记
+	if err == nil {
+		l.record(key, !ok)
+	}
+	return ok, err
+}
+
+// record 按 Key 累计判定计数;仅对真实判定(放行或限流拒绝)记账,
+// 后端错误/ctx 取消不计入,避免污染拒绝率差分
+func (l *Local) record(key string, rejected bool) {
+	l.mu.Lock()
+	c, ok := l.counts[key]
+	if !ok {
+		c = &keyCount{}
+		l.counts[key] = c
+	}
+	c.total++
+	if rejected {
+		c.rejected++
+	}
+	l.mu.Unlock()
 }
 
 // Update 热更新指定 Key 的速率与容量(规则变更的应用端点;
@@ -130,7 +176,8 @@ func (l *Local) Update(key string, rate, burst float64) error {
 	return nil
 }
 
-// Remove 移除指定 Key 的限流器(规则删除场景);Key 不存在视为已移除,返回 nil
+// Remove 移除指定 Key 的限流器(规则删除场景);Key 不存在视为已移除,返回 nil。
+// 计数快照保留(供事后审计),不随 Remove 清除。
 func (l *Local) Remove(key string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -150,6 +197,27 @@ func (l *Local) Stats(key string) Result {
 		return Result{}
 	}
 	return b.Peek()
+}
+
+// Snapshots 返回全部有判定记录 Key 的观测快照(计数 + 令牌水位),
+// 供 metrics 适配器与告警巡检拉取;后端已关闭时返回 nil 不报错。
+func (l *Local) Snapshots() map[string]KeySnapshot {
+	l.mu.RLock()
+	out := make(map[string]KeySnapshot, len(l.counts))
+	for key, c := range l.counts {
+		s := KeySnapshot{Key: key, Total: c.total, Rejected: c.rejected}
+		if b, ok := l.buckets[key]; ok {
+			res := b.Peek()
+			s.Remaining, s.Limit = res.Remaining, res.Limit
+		}
+		out[key] = s
+	}
+	closed := l.closed
+	l.mu.RUnlock()
+	if closed {
+		return nil
+	}
+	return out
 }
 
 // Close 关闭后端并释放全部限流器,幂等;关闭后新建与判定一律返回 ErrClosed

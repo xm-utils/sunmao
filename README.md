@@ -23,7 +23,7 @@ Go 微服务基础设施构件集，提供数据库访问、缓存、消息队�
 | `pipeline` | 泛型消息消费执行引擎：步骤链编排、错误分级、步骤超时、有界停机、同 Key 串行 | [README](pipeline/README.md) · [QUICKSTART](pipeline/QUICKSTART.md) |
 | `retry` | 非阻塞重试执行器：多策略（固定 / 指数 / 线性）、批量并发、监控回调 | [README](retry/README.md) · [QUICKSTART](retry/QUICKSTART.md) |
 | `breaker` | 熔断器：滑动窗口指标、状态机（Closed / Open / Half-Open）、告警、与 Retry 联动 | [README](breaker/README.md) · [QUICKSTART](breaker/QUICKSTART.md) |
-| `ratelimit` | 限流与降级：令牌桶 / 滑动窗口 / 漏桶三算法、本地内存与 Redis(Lua 原子) 双后端、gRPC/HTTP 入口中间件 | [README](ratelimit/README.md) · [QUICKSTART](ratelimit/QUICKSTART.md) |
+| `ratelimit` | 限流与降级：令牌桶 / 滑动窗口 / 漏桶三算法、本地内存与 Redis(Lua 原子) 双后端、gRPC/HTTP 入口中间件、拒绝率超阈值联动 `breaker` 告警通道 | [README](ratelimit/README.md) · [QUICKSTART](ratelimit/QUICKSTART.md) |
 | `deadletter` | 死信队列：自定义持久化（GORM）、自动恢复重试、实时监控告警 | [README](deadletter/README.md) · [QUICKSTART](deadletter/QUICKSTART.md) |
 | `consul` | Consul SDK 封装：服务注册 / 发现、健康检查、KV 配置 | [README](consul/README.md) |
 | `nacos` | Nacos SDK 封装：配置管理、服务发现（闭包模式独立客户端） | [README](nacos/README.md) |
@@ -75,7 +75,7 @@ tools/
 │   └── pipequeue/        # MQ × pipeline 桥接队列
 ├── nacos/                # Nacos 配置/注册中心
 ├── pipeline/             # 消息消费执行引擎
-├── ratelimit/            # 限流与降级（含 redisstore / grpcmiddleware / httpmiddleware 子包）
+├── ratelimit/            # 限流与降级（含 redisstore / alert / grpcmiddleware / httpmiddleware 子包）
 ├── redis/                # Redis 客户端
 ├── registry/             # 注册中心/配置中心统一抽象（consul/nacos 双适配器）
 ├── retry/                # 重试执行器

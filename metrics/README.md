@@ -4,7 +4,7 @@
 
 - 模块路径：`github.com/xm-utils/sunmao/metrics`
 - 技术选型：`prometheus/client_golang`（v1.22.0），不引入其他指标链
-- 兼容策略：**不删除、不修改** `breaker` / `mq/kafka/client` / `deadletter` 各自 `metrics.go` 的私有实现；接入一律经 `metrics/adapter/*` 薄适配器（拉取式 `prometheus.Collector`），组件本体零依赖本包
+- 兼容策略：**不删除、不修改** `breaker` / `mq/kafka/client` / `deadletter` / `ratelimit` 各自的私有指标实现；接入一律经 `metrics/adapter/*` 薄适配器（拉取式 `prometheus.Collector`），组件本体零依赖本包
 
 ## 目录结构
 
@@ -16,7 +16,8 @@ metrics/
 ├── adapter/
 │   ├── breaker/               # CircuitBreaker(Metrics) / Manager 快照 → xmt_breaker_*
 │   ├── kafka/                 # client.ConsumerMetrics 累计+窗口 → xmt_kafka_consumer_*
-│   └── deadletter/            # QueueMetrics.GetStats → xmt_deadletter_*（panic 安全）
+│   ├── deadletter/            # QueueMetrics.GetStats → xmt_deadletter_*（panic 安全）
+│   └── ratelimit/             # Local.Snapshots 判定计数+水位 → xmt_ratelimit_*（panic 安全）
 └── config.example.yaml
 ```
 
@@ -128,6 +129,26 @@ metrics.Register(dlmetrics.New(queueMetrics)) // *deadletter.QueueMetrics，须�
 | `xmt_deadletter_db_avg_retry_count` | gauge | `queue_key` |
 | `xmt_deadletter_last_check_timestamp_seconds` | gauge | `queue_key`（未经巡检器更新时不产出） |
 
+### ratelimit（`metrics/adapter/ratelimit`）
+
+```go
+import rlmetrics "github.com/xm-utils/sunmao/metrics/adapter/ratelimit"
+
+metrics.Register(rlmetrics.New(local))            // *ratelimit.Local，拉取时读 local.Snapshots()
+metrics.Register(rlmetrics.NewWithProvider(fn))   // 自定义快照源：多后端聚合、自持 SlidingWindow/LeakyBucket 实例
+```
+
+抓取时实时读快照（按 Key 的累计判定计数 + 当前令牌水位）；快照源 panic 兜底为抓取错误（InvalidMetric）。计数回退/不恒等（`Rejected > Total`、`Remaining < 0`）的异常快照被夹持，不会产出负值样本。
+
+| 指标 | 类型 | label |
+|---|---|---|
+| `xmt_ratelimit_requests_total` | counter | `key`, `result=allowed\|rejected` |
+| `xmt_ratelimit_rejection_rate` | gauge | `key`（累计拒绝率 0~1；`Total=0` 时不产出） |
+| `xmt_ratelimit_tokens_available` | gauge | `key`（当前可用令牌） |
+| `xmt_ratelimit_rule_rate` | gauge | `key`（当前生效速率，个/秒） |
+
+> 区间拒绝率（告警用）不在指标侧计算，由 `ratelimit/alert` 直接差分快照得出，见该组件 README。
+
 ## 设计说明
 
 1. **拉取式适配器**：适配器不包装、不拦截组件写入路径，仅在抓取瞬间读快照——组件私有 `metrics.go` 保持原语义，独立可引。
@@ -138,10 +159,11 @@ metrics.Register(dlmetrics.New(queueMetrics)) // *deadletter.QueueMetrics，须�
 ## 开发状态
 
 - `github.com/xm-utils/sunmao/trace` 尚未发布 tag，`go.mod` 中临时 `replace ../trace`（经 mq/kafka 间接依赖）；trace 发版后删除该 replace 并转 pseudo-version。
+- `github.com/xm-utils/sunmao/ratelimit` 亦未发 tag：`go.mod` 以 pseudo-version 引用（不留 replace），适配器依赖其 `Local.Snapshots` / `KeySnapshot`，需该代码合入后重新 `go mod tidy` 方能取到；ratelimit 发版后可转正式 tag。
 - 本模块未打 tag；接口冻结后发布 `metrics/v0.1.0`。
 
 ## 测试
 
 ```bash
-go test -race ./...        # 根包 + 三个适配器；deadletter 用例基于 miniredis 离线运行
+go test -race ./...        # 根包 + 四个适配器；deadletter/ratelimit 用例可离线运行
 ```

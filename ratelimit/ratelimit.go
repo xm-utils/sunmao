@@ -6,9 +6,10 @@
 //   - SlidingWindow:任意窗口内总数严格不超 Limit,精确计数场景;
 //   - LeakyBucket:出水速率恒定,流量整形/出口自我限速场景。
 //
-// 后端与装配:Local(单实例按 Key 多维限流)、redisstore(Redis Lua 原子共享份额)、
-// grpcmiddleware/httpmiddleware(入口中间件)。
-// 待演进:breaker 告警联动、规则热更新的配置源监听装配。
+// 后端与装配:Local(单实例按 Key 多维限流,内置判定计数快照)、redisstore(Redis Lua 原子共享份额)、
+// grpcmiddleware/httpmiddleware(入口中间件)、alert(拒绝率超阈值联动 breaker 告警通道)。
+// 指标侧经 metrics/adapter/ratelimit 拉取 Local.Snapshots 产出 xmt_ratelimit_*。
+// 待演进:规则热更新的配置源监听装配、redisstore 侧指标快照。
 package ratelimit
 
 import (

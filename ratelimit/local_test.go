@@ -204,3 +204,77 @@ func TestLocal_CtxCancelledPriority(t *testing.T) {
 		t.Fatalf("令牌充足应放行, 得到 %v", err)
 	}
 }
+
+func TestLocal_SnapshotsAccounting(t *testing.T) {
+	// 冻结时钟:回填不会发生,放行/拒绝序列完全确定
+	clock, _ := newFakeClock()
+	l, _ := NewLocal(LocalConfig{Rate: 10, Burst: 2, Clock: clock})
+	defer l.Close()
+	ctx := context.Background()
+
+	// 2 放行 + 2 限流拒绝
+	for i := 0; i < 2; i++ {
+		if err := l.Allow(ctx, "api"); err != nil {
+			t.Fatalf("预置放行失败: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := l.Allow(ctx, "api"); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("应被限流, 得到 %v", err)
+		}
+	}
+	// AllowN 被拒(余额不足)同样记账
+	if ok, _ := l.AllowN(ctx, "api", 100); ok {
+		t.Fatal("大额消耗应被拒")
+	}
+
+	snaps := l.Snapshots()
+	s, ok := snaps["api"]
+	if !ok {
+		t.Fatal("Snapshots 缺少已判定 Key")
+	}
+	if s.Total != 5 || s.Rejected != 3 {
+		t.Fatalf("计数期望 total=5 rejected=3, 得 total=%d rejected=%d", s.Total, s.Rejected)
+	}
+	if s.Limit != 10 {
+		t.Fatalf("速率快照期望 10, 得 %v", s.Limit)
+	}
+
+	// 非判定路径不记账:空 Key、ctx 取消、n<=0、未判定的惰性创建 Key
+	if err := l.Allow(ctx, ""); err == nil {
+		t.Fatal("空 Key 应报错")
+	}
+	cctx, ccancel := context.WithCancel(ctx)
+	ccancel()
+	_ = l.Allow(cctx, "api")
+	if _, err := l.AllowN(ctx, "api", 0); err == nil {
+		t.Fatal("n=0 应报错")
+	}
+	if _, err := l.Limiter("fresh"); err != nil {
+		t.Fatal(err)
+	}
+	snaps = l.Snapshots()
+	if snaps["api"].Total != 5 {
+		t.Fatalf("非判定路径不应记账, 得 %d", snaps["api"].Total)
+	}
+	if _, ok := snaps["fresh"]; ok {
+		t.Fatal("仅惰性创建未判定的 Key 不应出现在快照中")
+	}
+
+	// Remove 后计数保留、水位归零(供事后审计)
+	if err := l.Remove("api"); err != nil {
+		t.Fatal(err)
+	}
+	snaps = l.Snapshots()
+	if s = snaps["api"]; s.Total != 5 || s.Remaining != 0 {
+		t.Fatalf("Remove 后期望计数保留且水位归零: %+v", s)
+	}
+
+	// 关闭后快照返回 nil
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if snaps := l.Snapshots(); snaps != nil {
+		t.Fatalf("关闭后 Snapshots 应返回 nil, 得 %v", snaps)
+	}
+}

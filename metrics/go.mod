@@ -9,6 +9,7 @@ require (
 	github.com/xm-utils/sunmao/breaker v0.0.2
 	github.com/xm-utils/sunmao/deadletter v0.0.1
 	github.com/xm-utils/sunmao/mq/kafka v0.0.1
+	github.com/xm-utils/sunmao/ratelimit v0.0.0-20261125090906-ba434f0f3e6c
 	github.com/xm-utils/sunmao/redis v0.0.2
 )
 
@@ -28,8 +29,8 @@ require (
 	github.com/sirupsen/logrus v1.10.2 // indirect
 	github.com/xm-utils/sunmao/retry v0.0.2 // indirect
 	github.com/yuin/gopher-lua v1.1.1 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
-	google.golang.org/protobuf v1.36.5 // indirect
+	golang.org/x/sys v0.39.0 // indirect
+	golang.org/x/text v0.32.0 // indirect
+	google.golang.org/protobuf v1.36.10 // indirect
 	gorm.io/gorm v1.31.2 // indirect
 )

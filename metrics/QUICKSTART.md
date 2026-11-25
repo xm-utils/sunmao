@@ -33,11 +33,13 @@ import (
     breakermetrics "github.com/xm-utils/sunmao/metrics/adapter/breaker"
     dlmetrics "github.com/xm-utils/sunmao/metrics/adapter/deadletter"
     kafkametrics "github.com/xm-utils/sunmao/metrics/adapter/kafka"
+    rlmetrics "github.com/xm-utils/sunmao/metrics/adapter/ratelimit"
 )
 
 metrics.Register(breakermetrics.NewFromManager(breaker.GetManager())) // 全部熔断器
 metrics.Register(kafkametrics.New(consumer.GetMetrics(), "order-group"))
 metrics.Register(dlmetrics.New(queueMetrics))
+metrics.Register(rlmetrics.New(local))                                // *ratelimit.Local
 ```
 
 ## 4. 暴露 /metrics
@@ -58,6 +60,7 @@ go http.ListenAndServe(":9090", http.HandlerFunc(func(w http.ResponseWriter, r *
 curl -s localhost:9090/metrics | grep xmt_
 # xmt_breaker_requests_total{name="order-api",result="success"} 1024
 # xmt_kafka_consumer_messages_total{consumer="order-group"} 88
+# xmt_ratelimit_requests_total{key="api:order:create",result="rejected"} 12
 # xmt_order_create_fail_total{code="500"} 3
 ```
 
@@ -68,3 +71,4 @@ curl -s localhost:9090/metrics | grep xmt_
 | `metrics: collector already registered` | 同名指标重复注册；`Init` 重建注册表后需重新 Register 既有 collector |
 | Vec 构造报「至少需要一个 label 名」 | Vec 类型必须带 label；无 label 用 `NewGaugeFunc` 或原生 prometheus 构造 |
 | `/metrics` 里 `xmt_deadletter_*` 抓取报错 | Redis / 存储层未初始化，GetStats panic 已被兜底为抓取错误，先完成组件初始化 |
+| `xmt_ratelimit_*` 族缺失 | 该 `Local` 尚无真实判定（仅惰性创建不限流不记账），或已 `Close`（`Snapshots` 返回 nil） |
