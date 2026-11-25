@@ -1,0 +1,154 @@
+# lock 配置模板
+#
+# 说明（重要）：本组件根包**零仓外依赖**，不内置 YAML 解析、也不内置配置源监听。
+# 因此下面的键位是「装配层配置约定」：装配层定义同构 struct 反序列化本文件，再映射进
+# 各组件配置结构体（lock.Config、redisstore.Config、consulstore.Config）。
+# 键名与各结构体字段一一对应（snake_case），映射关系见每行注释；文件末尾给出加载示例。
+#
+# 三个后端共用同一份 lock.Config 语义（TTL/等待/轮询/续期/Owner），换后端只换构造器：
+#   backend: local  → lock.New(lock.Config{...})                        进程内，测试与单机部署
+#   backend: redis  → redisstore.New(redisstore.Config{...})            跨实例互斥 + 栅栏 token
+#   backend: consul → consulstore.New(consulstore.Config{...})          跨实例互斥 + 会话 TTL 回收
+#
+# 键位落库形态：
+#   redis  → Hash `xm_lock:{<key>}`（字段 owner/depth/fence）+ `xm_lock:{<key>}:fence` 计数器
+#            两段同 tag 同 slot，Cluster 下不会 CROSSSLOT
+#   consul → KV `<prefix>/<key>`（prefix 缺省 xm_lock），会话名 `xm_lock:<key>:<owner>`
+
+lock:
+  # ==================== 后端选择 ====================
+  backend: redis            # local | redis | consul
+  # 后端故障一律 fail-closed（绝不把「查不到」当作「拿到锁」），无开关可配
+
+  # ==================== 通用语义（→ lock.Config，两端一致） ====================
+  # 锁标识：按业务语义命名，建议带作用域前缀；留空报 lock.ErrInvalidConfig
+  key: "deadletter:recover:order-pay"
+  ttl: 30s                  # → lock.Config.TTL，租期；留空/0 取默认 30s。持有者崩溃后最迟经此时长被抢占
+  wait_timeout: 0s          # → lock.Config.WaitTimeout，Lock 的最长等待；0=不限（仅受 ctx 约束）
+  poll_interval: 100ms      # → lock.Config.PollInterval，竞争重试间隔，内部加 ±25% 抖动；下限 1ms
+  renew_interval: 0s        # → lock.Config.RenewInterval，看门狗续期间隔；0 取 TTL/3；-1 关闭自动续期
+                            #   （关闭后长任务必须自行周期调用 Refresh，否则租期到点被抢占）
+  owner: ""                 # → lock.Config.Owner，持有者标识；留空=默认按 goroutine 绑定（同 goroutine 重入、跨 goroutine 互斥）
+                            #   设为固定串（如 "order-svc-3"）则同进程内不同 goroutine 共用该实例互相重入
+  # owner_func / on_renew_error 是函数，不能由 YAML 表达：
+  #   owner_func     → 装配层注入 lock.GoroutineOwner 或自定义串（优先级高于 owner）
+  #   on_renew_error → 装配层接 logging/metrics，把续期失败打成告警
+
+  # ==================== Redis 后端（backend=redis） ====================
+  # client 字段无法由 YAML 表达：由装配层用 redis 组件 InitRedisCache 建好 *redis.Client 后
+  # 注入 redisstore.Config.Client（go-redis v8，与 redis 组件同版本）
+  redis:
+    addr: "127.0.0.1:6379"   # → redis.Options.Addr
+    password: ""             # → redis.Options.Password
+    db: 0                    # → redis.Options.DB
+
+  # ==================== Consul 后端（backend=consul） ====================
+  # backend 字段同样无法由 YAML 表达：装配层用 consul 组件建好 *consul.Client 后
+  # 注入 consulstore.Config.Backend（其方法集与 *consul.Client 一致，编译期已断言）
+  consul:
+    address: "127.0.0.1:8500" # → consul 组件客户端配置
+    scheme: "http"            # → consul 组件客户端配置
+    datacenter: "dc1"         # → consul 组件客户端配置（可选）
+    token: ""                 # → consul 组件客户端配置（启用 ACL 时填）
+    prefix: "xm_lock"         # → consulstore.Config.Prefix，KV 键前缀；留空取 "xm_lock"
+
+  # ==================== 多把锁的键位清单（可选，装配层批量预建） ====================
+  # 每条 → 装配层构造一个 Mutex 实例并常驻持有（实例与 Key 一一绑定，可并发使用）。
+  # ttl/renew_interval 留空则继承上面的通用值。
+  locks:
+    - key: "sharding:ddl:orders_202611"
+      backend: redis
+      ttl: 60s               # DDL 慢，租期给足；等待方走「已存在」分支即可
+      wait_timeout: 5m       # 建表期间其他实例应等待而非各跑一遍 DDL
+    - key: "deadletter:recover:order-pay"
+      backend: redis
+      ttl: 30s
+      wait_timeout: 0s       # 定时任务用 TryLock：抢不到就本轮跳过，不排队
+    - key: "job:daily-report"
+      backend: consul        # 需要「持有者崩溃即刻可被回收」时用 consul（会话 TTL 语义）
+      ttl: 30s
+
+# ==================== 加载示例（装配层） ====================
+# package main
+#
+# import (
+#     "os"
+#     "time"
+#
+#     "gopkg.in/yaml.v3"
+#     "github.com/go-redis/redis/v8"
+#
+#     "github.com/xm-utils/sunmao/lock"
+#     "github.com/xm-utils/sunmao/lock/consulstore"
+#     "github.com/xm-utils/sunmao/lock/redisstore"
+# )
+#
+# type LockCfg struct {
+#     Key          string        `yaml:"key"`
+#     Backend      string        `yaml:"backend"`
+#     TTL          time.Duration `yaml:"ttl"`
+#     WaitTimeout  time.Duration `yaml:"wait_timeout"`
+#     PollInterval time.Duration `yaml:"poll_interval"`
+#     RenewInterval time.Duration `yaml:"renew_interval"`
+#     Owner        string        `yaml:"owner"`
+# }
+#
+# func main() {
+#     raw, err := os.ReadFile("lock.yaml")
+#     if err != nil {
+#         panic(err) // 启动期失败退出属于业务选择，组件本身不 panic
+#     }
+#     var cfg struct {
+#         Lock struct {
+#             LockCfg  `yaml:",inline"` // 通用键位（key/ttl/wait_timeout/…）
+#             Redis    struct {
+#                 Addr string `yaml:"addr"`
+#             } `yaml:"redis"`
+#             Consul   struct {
+#                 Address string `yaml:"address"`
+#                 Prefix  string `yaml:"prefix"`
+#             } `yaml:"consul"`
+#             Locks    []LockCfg `yaml:"locks"` // 多把锁清单，逐条预建
+#         } `yaml:"lock"`
+#     }
+#     if err := yaml.Unmarshal(raw, &cfg); err != nil {
+#         panic(err)
+#     }
+#
+#     base := lock.Config{
+#         Key:           cfg.Lock.Key,
+#         TTL:           cfg.Lock.TTL,
+#         WaitTimeout:   cfg.Lock.WaitTimeout,
+#         PollInterval:  cfg.Lock.PollInterval,
+#         RenewInterval: cfg.Lock.RenewInterval, // 0=默认 TTL/3，-1=关闭自动续期
+#         Owner:         cfg.Lock.Owner,
+#         OnRenewError:  func(err error) { /* 接 logging/metrics，勿阻塞 */ },
+#     }
+#
+#     // 后端各建一次并常驻（实例可被多 goroutine 并发使用）
+#     var mu lock.Mutex
+#     switch cfg.Lock.Backend {
+#     case "local":
+#         mu, err = lock.New(base)
+#     case "redis":
+#         client := redis.NewClient(&redis.Options{Addr: cfg.Lock.Redis.Addr}) // 实际由 redis 组件建立
+#         mu, err = redisstore.New(redisstore.Config{Client: client, Config: base})
+#     case "consul":
+#         consulClient := newConsulClient() // consul 组件客户端
+#         mu, err = consulstore.New(consulstore.Config{Backend: consulClient, Prefix: cfg.Lock.Consul.Prefix, Config: base})
+#     }
+#     if err != nil {
+#         panic(err) // 非法配置在此暴露，而不是等到加锁时
+#     }
+#
+#     // 用法一：定时任务单副本执行（抢不到就跳过）
+#     //   if err := mu.TryLock(ctx); err != nil {
+#     //       if errors.Is(err, lock.ErrBusy) { return nil } // 本轮他人已在跑
+#     //       return err
+#     //   }
+#     //   defer func() { _ = mu.Unlock(ctx) }()
+#     //
+#     // 用法二：启动期 DDL 串行化（等待而非跳过）
+#     //   if err := mu.Lock(ctx); err != nil { ... }  // ErrTimeout / ctx 取消可区分
+#     //   defer func() { _ = mu.Unlock(ctx) }()
+# }

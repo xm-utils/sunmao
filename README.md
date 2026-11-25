@@ -24,6 +24,7 @@ Go 微服务基础设施构件集，提供数据库访问、缓存、消息队�
 | `retry` | 非阻塞重试执行器：多策略（固定 / 指数 / 线性）、批量并发、监控回调 | [README](retry/README.md) · [QUICKSTART](retry/QUICKSTART.md) |
 | `breaker` | 熔断器：滑动窗口指标、状态机（Closed / Open / Half-Open）、告警、与 Retry 联动 | [README](breaker/README.md) · [QUICKSTART](breaker/QUICKSTART.md) |
 | `ratelimit` | 限流与降级：令牌桶 / 滑动窗口 / 漏桶三算法、本地内存与 Redis(Lua 原子) 双后端、gRPC/HTTP 入口中间件、拒绝率超阈值联动 `breaker` 告警通道 | [README](ratelimit/README.md) · [QUICKSTART](ratelimit/QUICKSTART.md) |
+| `lock` | 分布式互斥锁：统一 `Mutex` 契约 + 进程内 / Redis(Lua+PEXPIRE) / Consul(Session+KV) 三后端、租期与看门狗自动续期、goroutine 绑定重入、栅栏 token | [README](lock/README.md) · [QUICKSTART](lock/QUICKSTART.md) |
 | `deadletter` | 死信队列：自定义持久化（GORM）、自动恢复重试、实时监控告警 | [README](deadletter/README.md) · [QUICKSTART](deadletter/QUICKSTART.md) |
 | `consul` | Consul SDK 封装：服务注册 / 发现、健康检查、KV 配置 | [README](consul/README.md) |
 | `nacos` | Nacos SDK 封装：配置管理、服务发现（闭包模式独立客户端） | [README](nacos/README.md) |
@@ -47,6 +48,10 @@ go get github.com/xm-utils/sunmao/redis
 # 示例：引入重试执行器
 go get github.com/xm-utils/sunmao/retry
 
+# 示例：引入分布式锁（根包零仓外依赖，后端子包按需引入）
+go get github.com/xm-utils/sunmao/lock
+go get github.com/xm-utils/sunmao/lock/redisstore
+
 # 示例：引入 MQ 门面 + 择一后端适配器
 go get github.com/xm-utils/sunmao/mq/core
 go get github.com/xm-utils/sunmao/mq/redis
@@ -67,6 +72,7 @@ tools/
 ├── gorm/database/        # GORM 数据库（含 sharding 子包）
 ├── grpcx/                # gRPC 工具
 ├── httpclient/           # HTTP 客户端
+├── lock/                 # 分布式互斥锁（含 redisstore / consulstore 子包）
 ├── mongodb/              # MongoDB 客户端
 ├── mq/                   # 消息队列族（顶层容器，自身无 go.mod）
 │   ├── core/             # 统一门面（纯契约，package mq）
@@ -86,7 +92,7 @@ tools/
 
 - **独立模块**：每个组件拥有独立 `go.mod`，可单独版本管理与引入，不强制拉取整个仓库；`mq` 族拆为四个同级模块（共用同一门面契约），按需引入以免把无关后端的 SDK 拉进依赖树。
 - **panic 转 error**：对外 API 不向调用方抛出 panic；内部 recover 后包装为 error 返回。
-- **配置模板**：需要外部配置的组件提供 `config.example.yaml`（如 `gorm/database`、`consul`、`nacos`），字段与结构体 yaml tag 一一对应（`httpclient` 即属此类，可直接反序列化，时长需写 `10s` 这类时长串）；`ratelimit`、`trace` 根包不内置 YAML 解析（保持零仓外依赖或只依赖 otel），`grpcx` 则只有 `ServiceConfig` 带 tag，其模板描述的是装配层同构 struct 的键位。
+- **配置模板**：需要外部配置的组件提供 `config.example.yaml`（如 `gorm/database`、`consul`、`nacos`），字段与结构体 yaml tag 一一对应（`httpclient` 即属此类，可直接反序列化，时长需写 `10s` 这类时长串）；`ratelimit`、`trace`、`lock` 根包不内置 YAML 解析（保持零仓外依赖或只依赖 otel），`grpcx` 则只有 `ServiceConfig` 带 tag，其模板描述的是装配层同构 struct 的键位。
 - **文档配套**：核心组件配备 README（完整 API 参考）+ QUICKSTART（5 分钟上手）。
 - **测试覆盖**：关键路径均有单元测试，`go test ./...` 即可验证。
 

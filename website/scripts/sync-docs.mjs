@@ -16,10 +16,10 @@ const REPO = 'github.com/xm-utils/sunmao';
 const BLOB = `https://${REPO}/blob/main`;
 const INTERNAL_PREFIX = `${REPO}/`;
 
-// —— 族分组（ARCHITECTURE_ROADMAP 7.4，合计 22 个模块，覆盖无遗漏）——
+// —— 族分组（ARCHITECTURE_ROADMAP 7.4，合计 23 个模块，覆盖无遗漏）——
 const GROUPS = [
   { name: '可观测性', modules: ['trace', 'metrics', 'logging'] },
-  { name: '服务治理', modules: ['ratelimit', 'breaker', 'retry'] },
+  { name: '服务治理', modules: ['ratelimit', 'lock', 'breaker', 'retry'] },
   { name: '通信与服务发现', modules: ['grpcx', 'httpclient', 'registry', 'consul', 'nacos'] },
   { name: '消息与异步编排', modules: ['mq/core', 'mq/kafka', 'mq/redis', 'mq/pipequeue', 'pipeline', 'deadletter'] },
   { name: '数据访问', modules: ['gorm/database', 'beego/database', 'redis', 'mongodb'] },
@@ -32,6 +32,7 @@ const DESCRIPTIONS = {
   metrics: '统一指标注册表：xmt_ 命名规范 + /metrics Handler + 组件拉取式适配器',
   logging: 'logrus JSON 统一日志：traceId 自动附加、文件轮转、可调级标准抽象',
   ratelimit: '限流与降级：令牌桶/滑动窗口/漏桶、本地与 Redis 双后端、gRPC/HTTP 入口中间件',
+  lock: '分布式互斥锁：统一 Mutex 契约 + 进程内/Redis(Lua)/Consul(Session+KV) 三后端、租期与看门狗续期',
   breaker: '熔断器：滑动窗口指标、三态状态机、告警与 Fallback 降级钩子',
   retry: '非阻塞重试执行器：多策略（固定/指数/线性）、批量并发、监控回调',
   grpcx: 'gRPC 服务工具：Server/Client 快速构建、cmux 端口复用、优雅停机',
@@ -65,7 +66,7 @@ function git(args) {
 
 // —— 1. 模块清单：解析 go.work 的 use 块 ——
 // go.work 被 gitignore（仅本地多模块联调），CI checkout 后不存在；
-// 此时回退到 GROUPS 内置清单（与 go.work 的 use 列表一一对应，共 22 个模块）。
+// 此时回退到 GROUPS 内置清单（与 go.work 的 use 列表一一对应，共 23 个模块）。
 function collectModuleDirs() {
   const file = path.join(repoRoot, 'go.work');
   if (!fs.existsSync(file)) return [...ALL_MODULE_DIRS];
@@ -203,7 +204,7 @@ function placeholderPage(mod) {
 }
 
 const CONFIG_PREAMBLE =
-  '> 本模板字段与各组件配置结构体的 `yaml` tag 一一对应；零依赖组件（如 `ratelimit`）描述的是装配层同构 struct 的键位。\n' +
+  '> 本模板字段与各组件配置结构体的 `yaml` tag 一一对应；零依赖组件（如 `ratelimit`、`lock`）描述的是装配层同构 struct 的键位。\n' +
   '> 模板真源为 `config.example.yaml`，由 sync-docs 自动搬运，请勿在站点内直接修改。\n\n';
 
 // —— 4. 生成 ——
