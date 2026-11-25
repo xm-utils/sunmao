@@ -232,6 +232,23 @@ metrics.RegisterExporter(xmlock.New(ddlMu, recoverMu))   // 任意 lock.Statser�
 
 采集器每次抓取实时拉取一次 `Stats()`，输出 `xmt_lock_operations_total{op,result}`、`xmt_lock_errors_total`、`xmt_lock_duration_seconds_total{phase}`、`xmt_lock_contention_ratio`、`xmt_lock_state{field}` 五个指标族；告警示例 `rate(xmt_lock_operations_total{result="lost"}[5m]) > 0`（细节见 `metrics/QUICKSTART.md`）。
 
+## 8. 想跑真实服务端的集成用例
+
+日常 `go test ./...` 全跑在 `miniredis` / `fakeBackend` 上，不碰任何外部服务。要确认「真 Redis 的 `PEXPIRE`、真 Cluster 的 `{tag}` 同槽、真 Consul 会话回收」时，加构建标签跑一次（环境不可用会自动跳过，不判失败）：
+
+```bash
+cd lock
+XM_LOCK_TEST_REDIS_ADDR=127.0.0.1:6379 \
+XM_LOCK_TEST_CONSUL_ADDR=127.0.0.1:8500 \
+  go test -tags integration -race -count=1 -timeout 180s ./...
+
+# 只验 Cluster 承诺（需已起的多节点集群）
+XM_LOCK_TEST_REDIS_CLUSTER_ADDRS=127.0.0.1:7000,127.0.0.1:7001 \
+  go test -tags integration -run TestIntegrationCluster ./redisstore
+```
+
+用例只在自建的 `xmlock_it:*` 键上动作并在 `Cleanup` 里回收（不 `FLUSHDB`）。完整变量表与逐条覆盖点见 `README.md` 的「集成用例」一节。
+
 ## 常见错误
 
 | 错误写法 | 后果 | 正确做法 |

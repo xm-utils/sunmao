@@ -25,7 +25,9 @@ lock/
 ├── example_test.go             # 可运行示例（带 // Output: 断言，go test 即校验）
 ├── config.example.yaml         # 配置模板（装配层同构 struct）
 ├── redisstore/                 # Redis 后端：Lua 原子脚本 + PEXPIRE 租期 + 栅栏 token
+│   └── integration_test.go     # 真实 Redis/Cluster 用例（//go:build integration）
 └── consulstore/                # Consul 后端：Session(TTL 租约) + KV Acquire/Release
+    └── integration_test.go     # 真实 Consul 会话与 KV 用例（//go:build integration）
 ```
 
 ## 后端对比与选型
@@ -346,10 +348,52 @@ GOWORK=off go test -race -count=2 ./...
 - 观测（`stats_test.go` 与两端 `stats_test.go`）：`Recorder` 失败归类（`ErrBusy` 不计错、`ErrLost` 作废持有时长）、`Local` 完整生命周期计数、`Attempts` 恒等式（8×25 并发下 `Attempts == Acquired+Reentered+Busy+异常轮次`）、三端 `Stats()` 的 backend/栅栏/续期口径、`Statser` 契约断言；
 - 示例（`example_test.go`、`redisstore/example_test.go`、`consulstore/example_test.go`）：全部带 `// Output:` 断言，由 `go test` 执行，覆盖重入与 Owner 策略、`Do` 的错误/panic 归还、TryLock 跳过、超时与 ctx 取消归类、栅栏单调、服务端过期与丢锁、`Stats()` 与 `Statser` 聚合、按可选接口探测后端能力——文档与行为同源，API 变了示例即失败。
 
+### 集成用例（需真实服务，默认不跑）
+
+```bash
+cd lock
+XM_LOCK_TEST_REDIS_ADDR=127.0.0.1:6379 \
+XM_LOCK_TEST_REDIS_CLUSTER_ADDRS=127.0.0.1:7000,127.0.0.1:7001 \
+XM_LOCK_TEST_CONSUL_ADDR=127.0.0.1:8500 \
+  go test -tags integration -race -count=1 -timeout 180s ./...
+```
+
+两个后端的 `integration_test.go` 挂在 `//go:build integration` 标签下：**不带标签的 `go test` 永远不编译它们**，所以没装 Redis/Consul 的机器与 CI 默认作业不会被拖红；加了标签但服务不可用时逐条 `t.Skip` 并打印补救提示，同样不判失败。
+
+它们只验内存替身兜不住的事——真服务端的 `PEXPIRE`/`EVALSHA` 行为、真实时钟下的看门狗续期、真会话回收与 `ErrLost` 归类：
+
+| 用例 | 覆盖点 |
+|---|---|
+| `redisstore/TestIntegrationExclusiveAndRelease` | 两副本互斥、服务端 `HGET owner/depth` 直读、跨持有者释放被拒、释放后 Hash 消失 |
+| `redisstore/TestIntegrationRealTTLExpiryAndLost` | 真实时钟下 TTL 到点：`RemainingTTL` 归零、他人抢占、旧持有者 `ErrLost`、`Stats().Lost==1` 且 `HoldNanos==0` |
+| `redisstore/TestIntegrationWatchdogKeepsLease` | TTL 2s 持有 5s（跨约 7 个续期周期）不被抢占，`Renewals>=3` 且零失败 |
+| `redisstore/TestIntegrationFenceMonotonicAcrossCycles` | 3 轮换人的栅栏单调递增，且栅栏 Key 不随释放回收 |
+| `redisstore/TestIntegrationConcurrentHoldersSerialised` | 8 副本 × `lock.Do` 并发，临界区峰值并发恰为 1 |
+| `redisstore/TestIntegrationDoReleasesOnPanic` | panic 穿过 `Do` 后服务端键已归还，其他副本立刻可拿 |
+| `redisstore/TestIntegrationClusterScriptsAndSameSlot` | `CLUSTER KEYSLOT` 对比两个 Key 同槽 + `ClusterClient` 走完整获取/释放（未配 env 则跳过） |
+| `consulstore/TestIntegrationSessionLifecycle` | 持锁期间 KV 存在且旁路会话抢不动，释放后 KV 消失、会话销毁、旁路会话可获得 |
+| `consulstore/TestIntegrationExpiryPreemption` | 会话被回收后抢占与 `ErrLost`，本地视图作废 |
+| `consulstore/TestIntegrationWatchdogHoldsLease` | 跨 2×生效租期持续续期不被抢占，零续期失败 |
+| `consulstore/TestIntegrationBackendRejectsForeignRelease` | 直接走 `Backend` 核对 Consul 的 CAS 语义（不依赖组件本地校验） |
+
+环境变量一览（均有缺省值，仅显式指定时才生效）：
+
+| 变量 | 缺省 | 用途 |
+|---|---|---|
+| `XM_LOCK_TEST_REDIS_ADDR` | `127.0.0.1:6379` | 单机/主从地址 |
+| `XM_LOCK_TEST_REDIS_PASSWORD` | 空 | 密码 |
+| `XM_LOCK_TEST_REDIS_DB` | `0` | 库号 |
+| `XM_LOCK_TEST_REDIS_CLUSTER_ADDRS` | 空（跳过 Cluster 用例） | 逗号分隔的节点列表 |
+| `XM_LOCK_TEST_CONSUL_ADDR` | `127.0.0.1:8500` | Consul agent 地址 |
+| `XM_LOCK_TEST_CONSUL_TOKEN` | 空 | ACL Token |
+| `XM_LOCK_TEST_CONSUL_MAXTTL` | `30`（秒） | 会话生效租期超过此值则跳过两条耗时用例（`session_ttl_min` 配得很大的 agent） |
+
+集成用例只在自建的 `xmlock_it:*` / `xmlock_it/*` 键上动作，`t.Cleanup` 里删除锁键、销毁会话，**不会碰库里的其他键，也不做 `FLUSHDB`/`purge`**。过期与续期两条要等真实租期走完（Consul 默认 `session_ttl_min=10s` → 单条约 12~25s），因此整批跑完约 40s，建议单独作业而非每次 PR。
+
 ## 已知边界与待办
 
 - **不做 Redlock 多节点算法**：`redisstore` 是单 Key（或同一 `{tag}` slot）方案，主从切换时理论上存在丢锁窗口。对强一致有要求的场景，用 `consulstore`（Raft 多数派）或等 `lock` 增加 `Multi` 聚合后端；
-- **Cluster 只做了接口层保证**：`redisstore.Client` 已接受 `*redis.ClusterClient`，锁 Key 的 `{tag}` 也能保证两个 Key 同 slot，但 `miniredis` 不支持 `CLUSTER` 命令，分片路由与MOVED 重定向未在用例里跑过——上 Cluster 前请用 3 节点实环境跑一次 DDL 场景；同理，`redis.Ring` 的一致性哈希由客户端控制，请确认 Key 真的落同一分片；
+- **Cluster 只做到「用例可跑」而非「CI 常驻」**：`redisstore.Client` 已接受 `*redis.ClusterClient`，锁 Key 的 `{tag}` 也能保证两个 Key 同 slot，`TestIntegrationClusterScriptsAndSameSlot` 会用 `CLUSTER KEYSLOT` 核对同槽并跑一轮完整获取/释放；但 `miniredis` 不支持 `CLUSTER` 命令，该用例需要显式配 `XM_LOCK_TEST_REDIS_CLUSTER_ADDRS` 才生效，默认作业里不会跑——首次上 Cluster 前请实跑一次（并顺手跑 DDL 场景）；同理，`redis.Ring` 的一致性哈希由客户端控制，请确认 Key 真的落同一分片；
 - **等待不保证公平**：抖动轮询不排队，极端情况下某副本可能长时间抢不到。需要严格 FIFO 请自行用 Redis `BLPOP` 排队或在 `consul` 侧用 blocking query（后者不吃 ctx，取消语义会失真，故未采用）；
 - **`ErrLost` 只报告事实、不做补偿**：一旦出现说明临界区可能已并发执行，组件不会自动重跑，调用方必须按幂等设计任务；
 - **`Local` 无租期**：`TTL`/`RenewInterval` 只参与校验，持锁 goroutine 泄漏就永久阻塞同实例等待者——用它做初始化保护时要确保 `defer Unlock`；
