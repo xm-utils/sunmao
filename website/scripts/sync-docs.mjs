@@ -64,8 +64,12 @@ function git(args) {
 }
 
 // —— 1. 模块清单：解析 go.work 的 use 块 ——
+// go.work 被 gitignore（仅本地多模块联调），CI checkout 后不存在；
+// 此时回退到 GROUPS 内置清单（与 go.work 的 use 列表一一对应，共 22 个模块）。
 function collectModuleDirs() {
-  const text = fs.readFileSync(path.join(repoRoot, 'go.work'), 'utf8');
+  const file = path.join(repoRoot, 'go.work');
+  if (!fs.existsSync(file)) return [...ALL_MODULE_DIRS];
+  const text = fs.readFileSync(file, 'utf8');
   const dirs = new Set();
   const block = text.match(/use\s*\(([\s\S]*?)\)/);
   if (block) {
@@ -75,7 +79,7 @@ function collectModuleDirs() {
     }
   }
   for (const m of text.matchAll(/^use\s+\.\/(\S+)\s*$/gm)) dirs.add(m[1]);
-  return [...dirs];
+  return dirs.size ? [...dirs] : [...ALL_MODULE_DIRS];
 }
 
 // —— 2. 逐模块采集：go.mod（go 指令 + 仓内依赖）/ 文档存在性 / 轻量 tag ——
@@ -209,7 +213,9 @@ function writeFile(rel, content) {
   fs.writeFileSync(abs, content.endsWith('\n') ? content : content + '\n');
 }
 
-if (!fs.existsSync(path.join(repoRoot, 'go.work'))) {
+// 校验 repoRoot 确实指向 sunmao 仓：go.work 可能不存在（CI 环境），
+// 改用仓根应存在的模块目录（common）作为判据。
+if (!fs.existsSync(path.join(repoRoot, 'common'))) {
   console.error(`[sync] 未找到 sunmao 仓：${repoRoot}（可用 SUNMAO_REPO 环境变量指定）`);
   process.exit(1);
 }
