@@ -61,6 +61,7 @@ func TestNewValidatesConfig(t *testing.T) {
 		{"缺 Client", Config{Config: lock.Config{Key: "k"}}},
 		{"缺 Key", Config{Client: h.client}},
 		{"续期不小于租期", Config{Client: h.client, Config: lock.Config{Key: "k", TTL: time.Second, RenewInterval: 2 * time.Second}}},
+		{"租期低于毫秒下限", Config{Client: h.client, Config: lock.Config{Key: "k", TTL: 500 * time.Microsecond}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -280,6 +281,38 @@ func TestWatchdogDetectsPreemption(t *testing.T) {
 	// 服务端 Key 已不属于自己, 后续释放同样报 ErrLost
 	if err := m.Unlock(context.Background()); !errors.Is(err, lock.ErrNotHeld) {
 		t.Errorf("未持有时 Unlock 应报 ErrNotHeld, 实际 %v", err)
+	}
+}
+
+// TestUnlockWithRenewInFlightDoesNotDeadlock 钉住一条实现不变式:
+// 停止看门狗(wd.Stop 等待续期 goroutine 退出)绝不能在持有实例互斥锁时调用——
+// 续期入口 renew 正需要这把锁读属主视图,锁内 Stop 会让两者互等死锁。
+// 用 1µs 续期间隔把续期 goroutine 变成"几乎常驻在 renew 里",使窗口必然命中。
+func TestUnlockWithRenewInFlightDoesNotDeadlock(t *testing.T) {
+	h := newHarness(t)
+	m := h.newMutex(t, "worker-1", lock.Config{TTL: 10 * time.Second, RenewInterval: time.Microsecond})
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			if err := m.TryLock(ctx); err != nil {
+				t.Errorf("第 %d 次 TryLock: %v", i, err)
+				return
+			}
+			time.Sleep(50 * time.Microsecond) // 给看门狗一次在飞的续期
+			if err := m.Unlock(ctx); err != nil {
+				t.Errorf("第 %d 次 Unlock: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Unlock 未返回: 释放路径与看门狗续期互等(锁内调用 wd.Stop)")
 	}
 }
 

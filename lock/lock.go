@@ -103,6 +103,9 @@ const (
 	defaultTTL          = 30 * time.Second
 	defaultPollInterval = 100 * time.Millisecond
 	minPollInterval     = time.Millisecond
+	// minTTL 租期下限:Redis 侧 PEXPIRE 只认毫秒,亚毫秒 TTL 会被截成 0,
+	// 脚本会「获得锁」后立即把 Key 过期掉——互斥形同空操作,必须在构造期拒掉
+	minTTL = time.Millisecond
 	// renewDivisor 看门狗默认续期间隔取 TTL/renewDivisor,留出 2 次续期失败的容错余量
 	renewDivisor = 3
 )
@@ -112,7 +115,8 @@ const (
 type Config struct {
 	// Key 锁标识,如 "sharding:ddl:orders";实际存储键由各后端加前缀(xm_lock:...)
 	Key string
-	// TTL 租期:持有者进程崩溃后最迟经过该时长被他人抢占。<=0 取默认 30s
+	// TTL 租期:持有者进程崩溃后最迟经过该时长被他人抢占。<=0 取默认 30s;
+	// 下限 1ms(服务端毫秒计时),更短直接判非法而非静默截断
 	TTL time.Duration
 	// WaitTimeout Lock 的最长等待时间;0 表示不限(仅受 ctx 约束)。
 	// 超时返回包装 ErrTimeout 的 error
@@ -148,6 +152,10 @@ func (c *Config) normalize() error {
 	}
 	if c.TTL == 0 {
 		c.TTL = defaultTTL
+	}
+	if c.TTL < minTTL {
+		return fmt.Errorf("%w: TTL 不能小于 %v(服务端以毫秒计时, 亚毫秒租期会让加锁成为空操作), 当前 %v",
+			ErrInvalidConfig, minTTL, c.TTL)
 	}
 	if c.WaitTimeout < 0 {
 		return fmt.Errorf("%w: WaitTimeout 不能为负, 当前 %v", ErrInvalidConfig, c.WaitTimeout)

@@ -236,30 +236,36 @@ func (m *Mutex) unlockAs(ctx context.Context, caller string) error {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
+	needStop := false
+	var retErr error
 	switch code {
 	case 1: // 仍有残留深度
 		m.depth = int(depth)
-		return nil
 	case 0: // 彻底释放
 		m.clearLocked()
-		m.wd.Stop()
-		return nil
+		needStop = true
 	case codeNoHolder:
 		// 服务端已过期:本地状态一并清掉,不再空转续期
 		m.clearLocked()
-		m.wd.Stop()
-		return fmt.Errorf("%w: key=%s 锁已不存在(租期 %v 已过)",
+		needStop = true
+		retErr = fmt.Errorf("%w: key=%s 锁已不存在(租期 %v 已过)",
 			lock.ErrNotHeld, m.cfg.Key, m.cfg.TTL)
 	case codeOtherOwner:
 		m.clearLocked()
-		m.wd.Stop()
-		return fmt.Errorf("%w: key=%s 属主已易主, 本地深度 %d: %w",
+		needStop = true
+		retErr = fmt.Errorf("%w: key=%s 属主已易主, 本地深度 %d: %w",
 			lock.ErrLost, m.cfg.Key, localDepth, lock.ErrNotHeld)
 	default:
-		return fmt.Errorf("%w: 释放脚本返回未知码 %d", lock.ErrInvalidConfig, code)
+		retErr = fmt.Errorf("%w: 释放脚本返回未知码 %d", lock.ErrInvalidConfig, code)
 	}
+	m.mu.Unlock()
+
+	// 停止看门狗必须在 m.mu 之外:Stop 等待在飞的续期 goroutine 退出,而 renew 入口
+	// 正需要这把锁读属主视图——锁内 Stop 会让两者互等死锁。
+	if needStop {
+		m.wd.Stop()
+	}
+	return retErr
 }
 
 // Close 停止看门狗并释放仍持有的锁。本地复位与看门狗停止总会完成,释放中的错误

@@ -12,6 +12,10 @@
 //     同 Session 重复 Acquire 本就幂等,再由本地 Owner 校验拦住跨 goroutine 误重入;
 //   - 不实现 lock.Fencer:consul 组件的 AcquireLock 未透出 KV 的 ModifyIndex,
 //     需要栅栏 token 的场景请用 redisstore。
+//
+// 租期以 Session TTL 表达,但 Consul 服务端会把它抬到 session_ttl_min(默认 10s):
+// 把 TTL 配得比 10s 更小不会加快崩溃后的回收,真要更快需调 Consul 服务端参数。
+// 等待期间的每轮尝试都会创建并销毁一份会话(一次 Raft 写),分钟级等待请上调 PollInterval。
 package consulstore
 
 import (

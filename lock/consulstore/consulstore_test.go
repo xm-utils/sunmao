@@ -232,6 +232,7 @@ func TestNewValidatesConfig(t *testing.T) {
 		{"缺 Backend", Config{Config: lock.Config{Key: "k"}}},
 		{"缺 Key", Config{Backend: newFakeBackend()}},
 		{"续期不小于租期", Config{Backend: newFakeBackend(), Config: lock.Config{Key: "k", TTL: time.Second, RenewInterval: 2 * time.Second}}},
+		{"租期低于毫秒下限", Config{Backend: newFakeBackend(), Config: lock.Config{Key: "k", TTL: 500 * time.Microsecond}}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -492,6 +493,35 @@ func TestWatchdogRenewsAndDetectsLoss(t *testing.T) {
 	// 本地已复位, 后续释放不再触碰后端
 	if err := m.Unlock(ctx); !errors.Is(err, lock.ErrNotHeld) {
 		t.Errorf("复位后 Unlock 应报 ErrNotHeld, 实际 %v", err)
+	}
+}
+
+// TestUnlockWithRenewInFlightDoesNotDeadlock 与 redisstore 同名用例钉同一条不变式:
+// wd.Stop 等待续期 goroutine 退出,绝不能在持有实例互斥锁时调用——renew 入口要同一把锁。
+func TestUnlockWithRenewInFlightDoesNotDeadlock(t *testing.T) {
+	f := newFakeBackend()
+	m := newFakeMutex(t, f, "worker-1", lock.Config{TTL: 10 * time.Second, RenewInterval: time.Microsecond})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 50; i++ {
+			if err := m.TryLock(context.Background()); err != nil {
+				t.Errorf("第 %d 次 TryLock: %v", i, err)
+				return
+			}
+			time.Sleep(50 * time.Microsecond) // 给看门狗一次在飞的续期
+			if err := m.Unlock(context.Background()); err != nil {
+				t.Errorf("第 %d 次 Unlock: %v", i, err)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Unlock 未返回: 释放路径与看门狗续期互等(锁内调用 wd.Stop)")
 	}
 }
 

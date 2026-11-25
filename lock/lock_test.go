@@ -47,6 +47,7 @@ func TestConfigNormalizeRejectsBadValues(t *testing.T) {
 		cfg  Config
 	}{
 		{"TTL 负值", Config{Key: "k", TTL: -time.Second}},
+		{"TTL 低于毫秒下限", Config{Key: "k", TTL: 500 * time.Microsecond}},
 		{"WaitTimeout 负值", Config{Key: "k", WaitTimeout: -time.Second}},
 		{"PollInterval 负值", Config{Key: "k", PollInterval: -time.Second}},
 		{"PollInterval 过小", Config{Key: "k", PollInterval: time.Microsecond}},
