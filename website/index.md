@@ -32,7 +32,7 @@ features:
   - title: 数据访问族
     details: gorm/database（含 sharding）· beego/database · redis 全数据结构 · mongodb。
     link: /docs/gorm/database/
-  - title: 设计约定
-    details: 独立 go.mod、panic 转 error、适配器模式优先、README+QUICKSTART+config 模板三件套、测试全绿。
-    link: /guide/conventions
+  - title: 架构与组合
+    details: 分层与依赖铁律 · 三条运行主线 · 五个典型装配配方与选型对照。拿来即用的组合策略。
+    link: /guide/architecture
 ---

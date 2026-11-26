@@ -47,6 +47,7 @@ export default defineConfig({
     nav: [
       { text: '首页', link: '/' },
       { text: '模块文档', link: `/docs/${modules.modules[0]?.dir ?? 'retry'}/` },
+      { text: '架构与组合', link: '/guide/architecture' },
       { text: '指南', link: '/guide/getting-started' },
       { text: '更新日志', link: '/changelog' },
     ],
@@ -57,7 +58,7 @@ export default defineConfig({
           text: '指南',
           items: [
             { text: '快速引入', link: '/guide/getting-started' },
-            { text: '设计约定', link: '/guide/conventions' },
+            { text: '架构与组合', link: '/guide/architecture' },
             { text: '模块总览', link: '/guide/modules' },
             { text: '仓内依赖', link: '/guide/dependencies' },
           ],

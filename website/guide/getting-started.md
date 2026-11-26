@@ -35,4 +35,5 @@ go get github.com/xm-utils/sunmao/mq/redis
 
 1. 在 sunmao 仓修改模块的 `README.md` / `QUICKSTART.md` / `config.example.yaml`；
 2. 回到 website 执行 `npm run sync`（`dev` / `build` 已自动前置）；
-3. 新增模块时同步更新 sunmao 仓 `go.work` 与 `scripts/sync-docs.mjs` 顶部的族分组和描述映射。
+3. [架构与组合](/guide/architecture) 页同样为生成物：它截取 sunmao 仓根 `README.md` 的「## 架构设计 … ## 快速引入」区间，要改架构叙述就改仓根 README，不要改站点页面；
+4. 新增模块时同步更新 sunmao 仓 `go.work` 与 `scripts/sync-docs.mjs` 顶部的族分组和描述映射。

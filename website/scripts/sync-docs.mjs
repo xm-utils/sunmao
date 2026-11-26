@@ -192,9 +192,9 @@ function renderDoc(moduleDir, fileName, title, description) {
 
 function placeholderPage(mod) {
   return (
-    frontmatter(mod.name, `${mod.dir} 文档待回补`) +
+    frontmatter(mod.name, `${mod.dir} 模块信息`) +
     `# ${mod.dir}\n\n` +
-    '::: warning 文档待回补\n该模块在 sunmao 仓中尚无 `README.md`，本页为 sync-docs 自动生成的占位页。\n:::\n\n' +
+    '::: warning 文档暂缺\n该模块暂未提供 `README.md`，完整用法请参考仓库内对应目录的示例与测试。\n:::\n\n' +
     `- **模块路径**：\`${mod.path}\`\n` +
     `- **所属族**：${mod.group}\n` +
     `- **简介**：${mod.description}\n` +
@@ -284,6 +284,36 @@ writeFile('guide/dependencies.md',
     ? `| 模块 | 依赖（仓内） |\n|---|---|\n${depRows.join('\n')}\n\n### 无仓内依赖的模块\n\n${modules.filter((m) => !m.deps.length).map((m) => `\`${m.dir}\``).join('、')}\n`
     : '当前各模块 `go.mod` 未发现仓内交叉依赖。'));
 
+// guide/architecture.md：原样搬运仓根 README 的「架构设计 + 组件组合策略」两节。
+// 真源只在 README（避免站点与仓库两处维护），代码围栏内的 ## 不参与区间判定。
+function sliceReadmeSections(startTitle, stopTitle) {
+  const file = path.join(repoRoot, 'README.md');
+  if (!fs.existsSync(file)) return '';
+  const lines = fs.readFileSync(file, 'utf8').split('\n');
+  let fence = false;
+  let start = -1;
+  let stop = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) { fence = !fence; continue; }
+    if (fence) continue;
+    const t = lines[i].trim();
+    if (start < 0 && t === startTitle) start = i;
+    else if (start >= 0 && t === stopTitle) { stop = i; break; }
+  }
+  return start >= 0 && stop > start ? lines.slice(start, stop).join('\n').trimEnd() : '';
+}
+
+const architecture = sliceReadmeSections('## 架构设计', '## 快速引入');
+if (architecture) {
+  writeFile('guide/architecture.md',
+    frontmatter('架构设计与组合策略', '分层与依赖铁律、三条运行主线、五个典型装配配方与选型对照') +
+    '# 架构设计与组合策略\n\n' +
+    `> 本页由 sync-docs 从 sunmao 仓根 \`README.md\` 的「架构设计」「组件组合策略」两节搬运而来，勿手工编辑。\n\n` +
+    rewriteMarkdown(architecture, '.') + '\n');
+} else {
+  console.warn('[sync] 仓根 README 未找到「## 架构设计 … ## 快速引入」区间，已跳过 guide/architecture.md');
+}
+
 // changelog.md
 const changelogSections = modules
   .filter((m) => m.tags.length)
@@ -302,5 +332,5 @@ writeFile('changelog.md',
 const noReadme = modules.filter((m) => !m.hasReadme).map((m) => m.dir);
 console.log(`[sync] sunmao 仓：${repoRoot}（HEAD ${repoHead || '未知'}）`);
 console.log(`[sync] 模块 ${modules.length} 个，生成页面 ${pageCount} 篇`);
-if (noReadme.length) console.log(`[sync] 缺 README（已生成占位页，回补 sunmao 仓第一批待办）：${noReadme.join('、')}`);
+if (noReadme.length) console.log(`[sync] 缺 README（已生成提示页）：${noReadme.join('、')}`);
 console.log('[sync] 完成 ✅');
