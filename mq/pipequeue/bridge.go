@@ -28,6 +28,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	mq "github.com/xm-utils/sunmao/mq/core"
 	xmpipeline "github.com/xm-utils/sunmao/pipeline"
 )
 

@@ -10,6 +10,7 @@ import (
 
 	segkafka "github.com/segmentio/kafka-go"
 	"github.com/sirupsen/logrus"
+	mq "github.com/xm-utils/sunmao/mq/core"
 	xmkafka "github.com/xm-utils/sunmao/mq/kafka/client"
 
 	"github.com/xm-utils/sunmao/trace"

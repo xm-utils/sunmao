@@ -6,6 +6,8 @@ import (
 	"time"
 
 	segkafka "github.com/segmentio/kafka-go"
+
+	mq "github.com/xm-utils/sunmao/mq/core"
 )
 
 func TestToKafkaMessageMapsFields(t *testing.T) {

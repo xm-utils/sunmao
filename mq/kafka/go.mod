@@ -6,6 +6,7 @@ require (
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/segmentio/kafka-go v0.4.51
 	github.com/sirupsen/logrus v1.10.2
+	github.com/xm-utils/sunmao/mq/core v0.0.2
 	github.com/xm-utils/sunmao/trace v0.0.1
 )
 
