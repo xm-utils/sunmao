@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql/driver"
 	"fmt"
 	"runtime/debug"
@@ -10,13 +11,27 @@ import (
 
 type TxFunc func(o orm.TxOrmer) error
 
-type OrmTx struct {
+// Transaction 简化事务执行（推荐方式）：回调返回 error 或 panic 时回滚。
+// 底层使用 orm.DoTx，崩溃与死锁类错误会自动重试。
+func Transaction(fn func(o orm.TxOrmer) error) (err error) {
+	defer recoverToErr(&err)
+	if fn == nil {
+		return orm.ErrArgs
+	}
+	return orm.NewOrm().DoTx(func(_ context.Context, txOrm orm.TxOrmer) error {
+		return fn(txOrm)
+	})
+}
+
+// Tx beego orm 事务处理器，与 gorm/database.Tx 用法一致（NewTx + Execute）。
+type Tx struct {
 	o   orm.TxOrmer
 	err error
 }
 
-func NewOrmTx() (tx *OrmTx) {
-	tx = &OrmTx{}
+// NewTx 开启事务；开启失败时错误延后到 Execute 返回。
+func NewTx() *Tx {
+	tx := &Tx{}
 	defer recoverToErr(&tx.err)
 	ormer, err := orm.NewOrm().Begin()
 	tx.o = ormer
@@ -24,7 +39,8 @@ func NewOrmTx() (tx *OrmTx) {
 	return tx
 }
 
-func (tx *OrmTx) Execute(f TxFunc) (err error) {
+// Execute 在事务内执行回调，失败或 panic 时回滚。
+func (tx *Tx) Execute(f TxFunc) (err error) {
 	if tx.err != nil {
 		return tx.err
 	}

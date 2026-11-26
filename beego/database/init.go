@@ -3,6 +3,7 @@ package database
 import (
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/beego/beego/v2/client/orm"
@@ -85,13 +86,26 @@ func InitMysql(config *MysqlConfig) error {
 		// 关键步骤：替换 ORM 的默认日志输出
 		orm.DebugLog = orm.NewLog(logrusWriter)
 	}
-	prefix = config.TablePrefix
+	SetPrefix(config.TablePrefix)
 	return nil
 }
 
-var prefix string
+var (
+	prefixMu sync.RWMutex
+	prefix   string
+)
 
+// SetPrefix 设置全局表前缀（并发安全）。
+func SetPrefix(p string) {
+	prefixMu.Lock()
+	prefix = p
+	prefixMu.Unlock()
+}
+
+// TableName 拼接表前缀与表名。
 func TableName(tableName string) string {
+	prefixMu.RLock()
+	defer prefixMu.RUnlock()
 	return prefix + tableName
 }
 
