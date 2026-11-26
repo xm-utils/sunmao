@@ -56,8 +56,8 @@ github.com/xm-utils/sunmao/breaker v0.0.2 h1:i3SUJlVwtULsbq2OHGErUugwOcVsnUz/Cce
 github.com/xm-utils/sunmao/breaker v0.0.2/go.mod h1:wSD+tJF0jZ5glv/sL2oAIqiK1BjfJmU/TyQBaXbtSm4=
 github.com/xm-utils/sunmao/deadletter v0.0.1 h1:sFmLe9trvZMW8YyvOYS5DZYGV3r6vyzpste3A+OeGtc=
 github.com/xm-utils/sunmao/deadletter v0.0.1/go.mod h1:aFhpi4V/hldI2WVieitGJ8YC+XqAdFKRibeeW8sguaE=
-github.com/xm-utils/sunmao/lock v0.0.0-20261125182311-26554e24f806 h1:ehQrw5+Wpt1biWeBmfu8PMj580ACUQ/R15RbdCO6Eto=
-github.com/xm-utils/sunmao/lock v0.0.0-20261125182311-26554e24f806/go.mod h1:Z2CvLCis09LfLBuJlSpt51MtSckWSolBndLfZR09pZk=
+github.com/xm-utils/sunmao/lock v0.0.1 h1:EawIVT5Y01H7gbt5pE6yTbU6QG53SKABkUKj0qMBKK0=
+github.com/xm-utils/sunmao/lock v0.0.1/go.mod h1:Z2CvLCis09LfLBuJlSpt51MtSckWSolBndLfZR09pZk=
 github.com/xm-utils/sunmao/mq/kafka v0.0.1 h1:V7TGuHdsZzpkSm4fSaJjzYvVOvLWrvB1nR/ujfkaWHc=
 github.com/xm-utils/sunmao/mq/kafka v0.0.1/go.mod h1:e0pmZFV9fi+1xVAafWvkCKGReitbCL83OR5x4YoVi0w=
 github.com/xm-utils/sunmao/ratelimit v0.0.0-20261125143930-172835522100 h1:EYiCtd++nQgADBDiVNkO5v1adafC/XT04qUfUBQl26w=
