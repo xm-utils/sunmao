@@ -25,6 +25,7 @@ lock:
   key: "deadletter:recover:order-pay"
   ttl: 30s                  # → lock.Config.TTL，租期；留空/0 取默认 30s；下限 1ms（服务端毫秒计时，更短报 ErrInvalidConfig）。持有者崩溃后最迟经此时长被抢占
                             #   consul 后端：小于服务端 session_ttl_min（默认 10s）的 ttl 会被 Consul 抬高到 10s，要更快回收需改服务端参数
+                            #   并且崩溃后的实际交接还要再加会话的 lock_delay（默认 15s），wait_timeout 按「ttl + 15s」量级设
   wait_timeout: 0s          # → lock.Config.WaitTimeout，Lock 的最长等待；0=不限（仅受 ctx 约束）
   poll_interval: 100ms      # → lock.Config.PollInterval，竞争重试间隔，内部加 ±25% 抖动；下限 1ms
   renew_interval: 0s        # → lock.Config.RenewInterval，看门狗续期间隔；0 取 TTL/3；-1 关闭自动续期
@@ -57,6 +58,10 @@ lock:
     datacenter: "dc1"         # → consul 组件客户端配置（可选）
     token: ""                 # → consul 组件客户端配置（启用 ACL 时填）
     prefix: "xm_lock"         # → consulstore.Config.Prefix，KV 键前缀；留空取 "xm_lock"
+    # 服务端两条实测行为（集成用例已钉住，均不可由本组件配置）：
+    #   1) 释放走 KV Release，只解绑会话不删键，锁键以「Session 为空的墓碑」留下；
+    #   2) 会话被 TTL 回收后，Consul 对该键施加会话的 lock_delay（默认 15s），
+    #      期间他人获取返回 busy；显式 Unlock 不触发该延迟，他人可立刻接手。
 
   # ==================== 多把锁的键位清单（可选，装配层批量预建） ====================
   # 每条 → 装配层构造一个 Mutex 实例并常驻持有（实例与 Key 一一绑定，可并发使用）。
@@ -71,8 +76,9 @@ lock:
       ttl: 30s
       wait_timeout: 0s       # 定时任务用 TryLock：抢不到就本轮跳过，不排队
     - key: "job:daily-report"
-      backend: consul        # 需要「持有者崩溃即刻可被回收」时用 consul（会话 TTL 语义）
+      backend: consul        # 需要 Raft 多数派语义时用 consul（崩溃后约 ttl + 15s lock_delay 才能接手）
       ttl: 30s
+      wait_timeout: 2m
 
 # ==================== 加载示例（装配层） ====================
 # package main

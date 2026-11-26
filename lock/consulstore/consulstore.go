@@ -16,6 +16,15 @@
 // 租期以 Session TTL 表达,但 Consul 服务端会把它抬到 session_ttl_min(默认 10s):
 // 把 TTL 配得比 10s 更小不会加快崩溃后的回收,真要更快需调 Consul 服务端参数。
 // 等待期间的每轮尝试都会创建并销毁一份会话(一次 Raft 写),分钟级等待请上调 PollInterval。
+//
+// 真实服务端的另两条行为(Consul 1.22 实测,集成用例有覆盖):
+//
+//   - 正常 Unlock 走 KV Release,只解除 Session 绑定、不删键:锁键会作为墓碑留下,
+//     值仍是上一个持有者的会话 ID(便于排障)。判断「是否被持有」要看 KV 的 Session
+//     字段,不能看键是否存在;显式释放后他人可立刻接手,不受下述延迟约束;
+//   - 持有者崩溃后会话被 TTL 回收时,Consul 对该键施加会话的 lock_delay(默认 15s),
+//     期间他人 Acquire 一律返回 false——崩溃后的实际交接耗时约 TTL + 15s,
+//     等待方要按这个量级设 WaitTimeout,不能只看 TTL。
 package consulstore
 
 import (
@@ -45,7 +54,8 @@ type Backend interface {
 	CreateSession(name string, ttl time.Duration) (string, error)
 	// DestroySession 销毁会话(其占用的 KV 一并释放)
 	DestroySession(sessionID string) error
-	// RenewSession 续期会话;会话已失效时返回 error
+	// RenewSession 续期会话。会话已失效时真实 consul/api 返回 (nil, nil) 而非 error,
+	// 故本包把 entry==nil 同样当作丢锁信号;自实现的 Backend 返回 error 亦可。
 	RenewSession(sessionID string) (*api.SessionEntry, error)
 	// AcquireLock 以 session 身份写锁 Key,返回是否获得
 	AcquireLock(key string, sessionID string) (bool, error)
@@ -224,6 +234,21 @@ func (m *Mutex) noteReleaseRejected(err error) error {
 	return err
 }
 
+// errRenewEmptyEntry Backend 返回 (nil, nil) 时补的锚点错误:consul/api 的 Renew 对
+// 已销毁/已过期的会话不给 error,只给空条目,只看 err 会把丢锁读成续期成功。
+var errRenewEmptyEntry = errors.New("consul: 会话已不存在(Renew 返回空条目)")
+
+// renewErr 归一化续期结果:优先透传后端错误,再把「会话不存在」的空条目折算成错误。
+func renewErr(entry *api.SessionEntry, err error) error {
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		return errRenewEmptyEntry
+	}
+	return nil
+}
+
 // Close 停止看门狗、释放仍持有的锁并销毁会话。本地复位与看门狗停止总会完成,
 // 释放/销毁中的错误经 errors.Join 合并返回;可重复调用。关闭后继续获取返回
 // 包装 lock.ErrClosed 的 error。只影响本实例的会话,不触碰他人持锁状态。
@@ -345,7 +370,8 @@ func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
 		session := m.sessionID
 		m.mu.Unlock()
 		// 重入顺带续一次租期,避免深层递归长时间不返回而临近过期
-		_, rerr := m.backend.RenewSession(session)
+		entry, rerr := m.backend.RenewSession(session)
+		rerr = renewErr(entry, rerr)
 		m.rec.NoteRenew(rerr)
 		if rerr != nil {
 			m.mu.Lock()
@@ -410,7 +436,8 @@ func (m *Mutex) renewOnce(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := m.backend.RenewSession(session); err != nil {
+	entry, err := m.backend.RenewSession(session)
+	if err = renewErr(entry, err); err != nil {
 		m.forfeit()
 		return fmt.Errorf("%w: key=%s 会话续期失败(会话可能已被回收), 本地深度已作废: %w",
 			lock.ErrLost, m.cfg.Key, err)

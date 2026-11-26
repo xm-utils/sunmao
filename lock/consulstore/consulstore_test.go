@@ -34,6 +34,10 @@ type fakeBackend struct {
 	errRenew   error
 	errDestroy error
 	panicOn    string
+
+	// renewEmptyEntry 复刻真实 consul/api 的返回形态:会话已不存在时
+	// Renew 给 (nil, nil) 而不是 error(集成用例在 Consul 1.22 上实测到)。
+	renewEmptyEntry bool
 }
 
 type fakeSession struct {
@@ -146,6 +150,9 @@ func (f *fakeBackend) RenewSession(sessionID string) (*api.SessionEntry, error) 
 	}
 	if f.errRenew != nil {
 		return nil, f.errRenew
+	}
+	if f.renewEmptyEntry {
+		return nil, nil
 	}
 	s := f.sessions[sessionID]
 	if s == nil || !s.live {
@@ -389,6 +396,70 @@ func TestReentrantRenewFailureRollsBackDepth(t *testing.T) {
 	if err := m.Unlock(ctx); err != nil {
 		t.Fatalf("Unlock: %v", err)
 	}
+}
+
+// TestEmptyRenewEntryDetectedAsLost 真实 consul/api 对已销毁/已过期的会话
+// 返回 (nil, nil) 而非 error:若只看 error,看门狗会对着一个废会话一直"续期成功",
+// 互斥性就此静默失效。手动 Refresh、看门狗 Tick、重入三条路径都得判出来。
+func TestEmptyRenewEntryDetectedAsLost(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("手动 Refresh", func(t *testing.T) {
+		f := newFakeBackend()
+		m := newFakeMutex(t, f, "worker-1", lock.Config{TTL: 10 * time.Second, RenewInterval: -1})
+		if err := m.Lock(ctx); err != nil {
+			t.Fatalf("Lock: %v", err)
+		}
+		f.renewEmptyEntry = true
+		if err := m.Refresh(ctx); !errors.Is(err, lock.ErrLost) {
+			t.Fatalf("空条目应判 ErrLost, 实际 %v", err)
+		}
+		if m.Held() || m.Depth() != 0 || m.SessionID() != "" {
+			t.Errorf("判为丢锁后本地视图应复位, Held=%v Depth=%d Session=%q", m.Held(), m.Depth(), m.SessionID())
+		}
+		st := m.Stats()
+		if st.Lost == 0 || st.RenewFailures == 0 {
+			t.Errorf("空条目应计入 Lost 与 RenewFailures, 快照 %+v", st)
+		}
+		if err := m.Unlock(ctx); !errors.Is(err, lock.ErrNotHeld) {
+			t.Errorf("复位后 Unlock 应报 ErrNotHeld, 实际 %v", err)
+		}
+	})
+
+	t.Run("看门狗 Tick", func(t *testing.T) {
+		f := newFakeBackend()
+		var reported atomic.Value
+		m := newFakeMutex(t, f, "worker-1", lock.Config{
+			TTL:           10 * time.Second,
+			RenewInterval: -1,
+			OnRenewError:  func(err error) { reported.Store(err) },
+		})
+		if err := m.Lock(ctx); err != nil {
+			t.Fatalf("Lock: %v", err)
+		}
+		f.renewEmptyEntry = true
+		if stop := m.wd.Tick(ctx); !stop {
+			t.Error("空条目续期后看门狗应停止, 不该继续空转")
+		}
+		if got, _ := reported.Load().(error); got == nil || !errors.Is(got, lock.ErrLost) {
+			t.Errorf("OnRenewError 应收到 ErrLost, 实际 %v", got)
+		}
+	})
+
+	t.Run("重入顺带续期", func(t *testing.T) {
+		f := newFakeBackend()
+		m := newFakeMutex(t, f, "worker-1", lock.Config{TTL: 10 * time.Second, RenewInterval: -1})
+		if err := m.Lock(ctx); err != nil {
+			t.Fatalf("Lock: %v", err)
+		}
+		f.renewEmptyEntry = true
+		if err := m.Lock(ctx); err == nil {
+			t.Error("重入遇空条目应报错而非假装获得")
+		}
+		if m.Depth() != 1 {
+			t.Errorf("失败的重入不得改变深度, 期望 1, 实际 %d", m.Depth())
+		}
+	})
 }
 
 func TestCrossGoroutineReleaseRejected(t *testing.T) {

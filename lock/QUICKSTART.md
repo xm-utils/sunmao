@@ -247,7 +247,18 @@ XM_LOCK_TEST_REDIS_CLUSTER_ADDRS=127.0.0.1:7000,127.0.0.1:7001 \
   go test -tags integration -run TestIntegrationCluster ./redisstore
 ```
 
-用例只在自建的 `xmlock_it:*` 键上动作并在 `Cleanup` 里回收（不 `FLUSHDB`）。完整变量表与逐条覆盖点见 `README.md` 的「集成用例」一节。
+用例只在自建的 `xmlock_it:*` 键上动作并在 `Cleanup` 里回收（不 `FLUSHDB`、不删 Consul 以外的键）。完整变量表与逐条覆盖点见 `README.md` 的「集成用例」一节。
+
+跑 consulstore 时建议给 agent 配 `session_ttl_min=1s`（它是配置文件项，不是 CLI flag），否则过期与续期两条要各自等 10s 以上：
+
+```bash
+echo '{"session_ttl_min": "1s"}' > /tmp/consul_it.json
+docker run -d --name xmlock-consul-it -p 127.0.0.1:8500:8500 \
+  -v /tmp/consul_it.json:/consul/config/it.json:ro \
+  hashicorp/consul:1.22.7 consul agent -dev -client 0.0.0.0 -config-dir=/consul/config
+```
+
+实跑（Consul 1.22.7）实测到三条只能从服务端拿到的事实，已写进断言与文档：`KV Release` 不删键（锁键留作 `Session` 为空的墓碑）、`Session().Renew` 对已失效会话返回 `(nil, nil)` 而非 error（`consulstore` 据此判 `ErrLost`）、会话被 TTL 回收后还要等 `lock_delay`（默认 15s）别人才能接手。
 
 ## 常见错误
 
@@ -263,6 +274,7 @@ XM_LOCK_TEST_REDIS_CLUSTER_ADDRS=127.0.0.1:7000,127.0.0.1:7001 \
 | 用 `Local` 时指望 `TTL` 自动过期 | `Local` 没有租期，持锁 goroutine 泄漏就永久阻塞 | 进程内也要保证解锁；跨进程需求换后端 |
 | `WaitTimeout` 与 ctx 都不设，纯 `Lock` 死等 | 后端持续 busy 时 goroutine 长挂 | 设 `WaitTimeout`，并把 `ErrTimeout` 当作可容忍的降级分支 |
 | `TTL` 设成亚毫秒 | 服务端只认毫秒，静默接受会得到一抢就过期的空锁 | `TTL >= 1ms`（构造期即报 `ErrInvalidConfig`），业务锁建议 5s 起 |
+| consul 后端把 `WaitTimeout` 只设成 `TTL` | 持有者崩溃后会话回收要再等 `lock_delay`（默认 15s），等待方先报 `ErrTimeout` | 按「`TTL` + 15s」量级设 `WaitTimeout`，或定时任务直接用 `TryLock` 跳过本轮 |
 | `OnRenewError` 里做阻塞 IO | 拖慢看门狗节拍，续期赶不上租期 | 只做投递（channel / 打点），重活交给外层 |
 | 用 `lock.Do` 做 ticker 任务的「抢不到就跳过」 | `Do` 内部是 `Lock`，会排队而不是跳过 | 跳过语义自己写 `TryLock` + `errors.Is(err, lock.ErrBusy)`（见第 2 步）|
 

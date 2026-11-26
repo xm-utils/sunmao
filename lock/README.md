@@ -194,7 +194,7 @@ err = mu.Unlock(ctx)
 err = mu.Close()
 ```
 
-会话在**首次真正获取时惰性创建**、深度归零或 `Close` 时 `Release`+`Destroy` 两步回收——不持锁时不白占一份会话。重入由本地 `depth` + Owner 校验拦下（同 Session 重复 `Acquire` 在 Consul 侧本就幂等，再由本地校验挡住跨 goroutine 误重入）。
+会话在**首次真正获取时惰性创建**、深度归零或 `Close` 时 `Release`+`Destroy` 两步回收——不持锁时不白占一份会话。注意 Consul 的 `KV Release` 只解除会话绑定、**不删键**：释放后锁键会作为「`Session` 为空的墓碑」留下，值仍是上一个持有者的会话 ID（便于排障）；判断锁是否被持有要看 KV 的 `Session` 字段，不能看键是否存在。重入由本地 `depth` + Owner 校验拦下（同 Session 重复 `Acquire` 在 Consul 侧本就幂等，再由本地校验挡住跨 goroutine 误重入）。
 
 `Backend` 是 5 个方法的最小能力集（`CreateSession`/`DestroySession`/`RenewSession`/`AcquireLock`/`ReleaseLock`），方法签名与 `consul` 组件客户端逐一对应；抽象这一层的唯一目的是让测试无需真实 Consul 就能覆盖全部判定分支，生产直接传组件客户端。
 
@@ -307,8 +307,8 @@ func (m *QueueManager) recoverAndRetryLocked() error {
 | 重入计数落点 | **服务端** `depth` 字段，跨进程可见 | **本地** `depth`，同 Session 重复 Acquire 幂等 |
 | ctx 覆盖范围 | 获取、释放、续期、剩余租期查询 | 仅获取等待；`consul` 组件客户端方法不吃 ctx，释放/续期无法被 ctx 打断 |
 | 释放请求的 ctx 兜底 | ctx 已取消时内部换 `context.Background()` 保证归还 | 无 ctx 概念，直接发起释放 |
-| 属主已失的暴露点 | 释放脚本返回码 / 续期脚本返回码 | `ReleaseLock` 返回 false / `RenewSession` 报错 |
-| 崩溃后回收 | Key `PEXPIRE` 到点消失 | 会话 TTL 到点由 Consul 释放其占用 KV |
+| 属主已失的暴露点 | 释放脚本返回码 / 续期脚本返回码 | `ReleaseLock` 返回 false / `RenewSession` 报错**或返回空条目**（真实 consul/api 对已失效会话给 `(nil, nil)`，本包两种形态都判为 `ErrLost`） |
+| 崩溃后回收 | Key `PEXPIRE` 到点消失 | 会话 TTL 到点由 Consul 释放其占用 KV，**但他人接手还要等会话的 `lock_delay`（默认 15s）** |
 | 运维可见性 | `HGETALL xm_lock:{key}`、`PTTL` | Consul UI/CLI 的 KV 目录 + `consul session list`（会话名带锁 Key 与持有者） |
 | `DestroySession` 失败 | 不适用 | 锁已释放的事实不变，错误里明确说明会话将在 TTL 后自动回收 |
 
@@ -343,7 +343,7 @@ GOWORK=off go test -race -count=2 ./...
 - `Do`（`do_test.go`）：参数校验、临界区内持有且返回后释放、获取失败不执行 `fn`、业务错误不被释放错误覆盖（`errors.Join` 两边都可 `errors.Is`）、`fn` panic 仍归还锁且 panic 原样抛回、同 goroutine 嵌套重入；
 - `Local`：TryLock 互斥、同 goroutine 重入（栅栏值不变、深度 2）、跨 goroutine 释放被拒、释放即唤醒、等待超时、ctx 取消、已取消 ctx 下仍能释放、`Close` 复位与 `ErrClosed`、栅栏单调、两实例互不相知、静态 Owner 语义、32×20 并发临界区峰值恰为 1；
 - `redisstore`：基于 `miniredis` 离线运行，覆盖服务端字段/深度/栅栏断言、`FastForward` 驱动租期过期与抢占、看门狗续期延长 `PTTL`、篡改属主后 `Tick` 停轮并回 `ErrLost`、`Refresh` 手动续期、后端断开时 fail-closed、跨 goroutine 释放被拒而 `Close` 仍能归还、**在飞续期与释放互不等（`TestUnlockWithRenewInFlightDoesNotDeadlock`）**、`redis.UniversalClient` 走完整获取/释放与类型化空客户端转 error、3 实例 36 并发峰值恰为 1；
-- `consulstore`：自建 `fakeBackend` 复刻 Session+KV 语义，覆盖会话惰性创建与销毁、busy 路径销毁临时会话、重入只加本地深度并顺带续期、会话 TTL 回收后被他副本抢占、`ReleaseLock` 被拒报 `ErrLost`、`DestroySession` 失败时「锁已释放」事实不变、Backend panic 一律转 error、跨 goroutine 释放被拒而 `Close` 仍能归还、在飞续期与释放互不等、3 副本 × 10 轮并发峰值恰为 1；
+- `consulstore`：自建 `fakeBackend` 复刻 Session+KV 语义，覆盖会话惰性创建与销毁、busy 路径销毁临时会话、重入只加本地深度并顺带续期、会话 TTL 回收后被他副本抢占、`ReleaseLock` 被拒报 `ErrLost`、**续期返回 `(nil, nil)` 时同样判 `ErrLost`**（真实 consul/api 的形态，Refresh/看门狗/重入三条路径）、`DestroySession` 失败时「锁已释放」事实不变、Backend panic 一律转 error、跨 goroutine 释放被拒而 `Close` 仍能归还、在飞续期与释放互不等、3 副本 × 10 轮并发峰值恰为 1；
 - 两个场景用例（DDL、死信捞取）在三处各跑一遍，把「只执行一次 / 同一时刻只一个副本」的不变式钉成契约；
 - 观测（`stats_test.go` 与两端 `stats_test.go`）：`Recorder` 失败归类（`ErrBusy` 不计错、`ErrLost` 作废持有时长）、`Local` 完整生命周期计数、`Attempts` 恒等式（8×25 并发下 `Attempts == Acquired+Reentered+Busy+异常轮次`）、三端 `Stats()` 的 backend/栅栏/续期口径、`Statser` 契约断言；
 - 示例（`example_test.go`、`redisstore/example_test.go`、`consulstore/example_test.go`）：全部带 `// Output:` 断言，由 `go test` 执行，覆盖重入与 Owner 策略、`Do` 的错误/panic 归还、TryLock 跳过、超时与 ctx 取消归类、栅栏单调、服务端过期与丢锁、`Stats()` 与 `Statser` 聚合、按可选接口探测后端能力——文档与行为同源，API 变了示例即失败。
@@ -371,8 +371,8 @@ XM_LOCK_TEST_CONSUL_ADDR=127.0.0.1:8500 \
 | `redisstore/TestIntegrationConcurrentHoldersSerialised` | 8 副本 × `lock.Do` 并发，临界区峰值并发恰为 1 |
 | `redisstore/TestIntegrationDoReleasesOnPanic` | panic 穿过 `Do` 后服务端键已归还，其他副本立刻可拿 |
 | `redisstore/TestIntegrationClusterScriptsAndSameSlot` | `CLUSTER KEYSLOT` 对比两个 Key 同槽 + `ClusterClient` 走完整获取/释放（未配 env 则跳过） |
-| `consulstore/TestIntegrationSessionLifecycle` | 持锁期间 KV 存在且旁路会话抢不动，释放后 KV 消失、会话销毁、旁路会话可获得 |
-| `consulstore/TestIntegrationExpiryPreemption` | 会话被回收后抢占与 `ErrLost`，本地视图作废 |
+| `consulstore/TestIntegrationSessionLifecycle` | 持锁期间 KV 绑定本会话且旁路会话抢不动；释放后 KV 的 `Session` 已清空（墓碑仍在）、会话不可再续、旁路会话可获得且能归还，随后 b 可获取 |
+| `consulstore/TestIntegrationExpiryPreemption` | 会话被 TTL 回收：`Renew` 只返空条目不报错、`Refresh` 报 `ErrLost`、本地视图作废、KV 不再绑定会话；再轮询等到 `lock_delay`（实测约 15s）后 b 完成抢占 |
 | `consulstore/TestIntegrationWatchdogHoldsLease` | 跨 2×生效租期持续续期不被抢占，零续期失败 |
 | `consulstore/TestIntegrationBackendRejectsForeignRelease` | 直接走 `Backend` 核对 Consul 的 CAS 语义（不依赖组件本地校验） |
 
@@ -387,8 +387,18 @@ XM_LOCK_TEST_CONSUL_ADDR=127.0.0.1:8500 \
 | `XM_LOCK_TEST_CONSUL_ADDR` | `127.0.0.1:8500` | Consul agent 地址 |
 | `XM_LOCK_TEST_CONSUL_TOKEN` | 空 | ACL Token |
 | `XM_LOCK_TEST_CONSUL_MAXTTL` | `30`（秒） | 会话生效租期超过此值则跳过两条耗时用例（`session_ttl_min` 配得很大的 agent） |
+| `XM_LOCK_TEST_CONSUL_LOCKDELAY` | `15`（秒） | 过期用例等待抢占的上限，需与 agent 会话的 `lock_delay` 对齐（本组件不传该字段，故为 Consul 默认 15s） |
 
-集成用例只在自建的 `xmlock_it:*` / `xmlock_it/*` 键上动作，`t.Cleanup` 里删除锁键、销毁会话，**不会碰库里的其他键，也不做 `FLUSHDB`/`purge`**。过期与续期两条要等真实租期走完（Consul 默认 `session_ttl_min=10s` → 单条约 12~25s），因此整批跑完约 40s，建议单独作业而非每次 PR。
+集成用例只在自建的 `xmlock_it:*` / `xmlock_it/*` 键上动作，`t.Cleanup` 里删除锁键（含 Consul 的 `Session` 已清空的墓碑）、销毁会话，**不会碰库里的其他键，也不做 `FLUSHDB`/`purge`**。耗时看真实租期：Consul agent 默认 `session_ttl_min=10s` 时 consulstore 整批约 30~40s（过期用例还要叠加 15s `lock_delay`），把 agent 配成 1s 后实测约 22s；redisstore 整批约 8s。建议单独作业而非每次 PR。
+
+本地起一个适合跑集成用例的 Consul（`session_ttl_min` 只能走配置文件，不是 CLI flag）：
+
+```bash
+echo '{"session_ttl_min": "1s"}' > /tmp/consul_it.json
+docker run -d --name xmlock-consul-it -p 127.0.0.1:8500:8500 \
+  -v /tmp/consul_it.json:/consul/config/it.json:ro \
+  hashicorp/consul:1.22.7 consul agent -dev -client 0.0.0.0 -config-dir=/consul/config
+```
 
 ## 已知边界与待办
 
@@ -399,6 +409,8 @@ XM_LOCK_TEST_CONSUL_ADDR=127.0.0.1:8500 \
 - **`Local` 无租期**：`TTL`/`RenewInterval` 只参与校验，持锁 goroutine 泄漏就永久阻塞同实例等待者——用它做初始化保护时要确保 `defer Unlock`；
 - **`consulstore` 无栅栏 token**：需要「旧持有者写入被拒」的场景请用 Redis，或等 `consul` 组件透出 `ModifyIndex`；
 - **Consul 服务端的 `session_ttl_min`（默认 10s）会抬高更小的 TTL**：把 `TTL` 配成 3s 并不会让崩溃回收变快，实际租约由服务端参数决定——要调快回收请改 Consul 的 `session_ttl_min`，而不是组件配置；
+- **崩溃交接 = TTL + `lock_delay`（实测约 15s）**：持有者未显式释放而会话被 TTL 回收时，Consul 会对该键施加会话的 `lock_delay`（默认 15s），期间他人 `Acquire` 一律返回 false。所以 `WaitTimeout` 要按「TTL + 15s」量级设，而不是只看 TTL；正常 `Unlock` 显式释放不触发该延迟，他人可立刻接手（集成用例已钉住两种路径）。想去掉这 15s 只能在自己创建的会话上设 `LockDelay=0`，需自备 `Backend` 实现（`consul` 组件的 `CreateSession` 不透出该字段）；
+- **`consulstore` 释放后 KV 不删**：`Release` 只解绑会话，锁键作为墓碑留下（值为上一个持有者的会话 ID）；静态 Key 下不会无限增长，但按日期/任务 ID 动态生成海量 Key 时需自行回收；
 - **`redisstore` 的栅栏计数 Key 常驻**：`xm_lock:{key}:fence` 不过期也不删除（单调性所需），每个锁 Key 对应一个极小 Key；动态创建海量锁 Key 的场景需自行回收；
 - **`consulstore` 等待期间每轮尝试建/销一次会话**：会话创建是 Raft 写，长时间 `Lock` 等待应上调 `PollInterval`（默认 100ms 对分钟级等待仍偏激进），能接受跳过就优先 `TryLock`；
 - **`redisstore` 每次获取一个 RTT**：跨机房部署时轮询等待会放大抖动，建议 `PollInterval` 上调（默认 100ms 起）并优先 `TryLock` 跳过；
