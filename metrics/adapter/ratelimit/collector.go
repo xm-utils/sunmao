@@ -2,7 +2,7 @@
 // 按 Key 判定计数与令牌水位）适配为统一注册表可收录的 prometheus.Collector。
 //
 // 拉取式设计：每次抓取时实时读快照，不改动、不包装限流后端本体；
-// ratelimit 组件零依赖本包（适配器模式，见路线图 3.1.2 兼容策略）。
+// ratelimit 组件零依赖本包（适配器模式，不改动本体）。
 // panic 安全：provider panic 兜底为抓取错误（InvalidMetric），不击穿抓取方。
 package ratelimit
 

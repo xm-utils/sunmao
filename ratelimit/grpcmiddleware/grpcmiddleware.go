@@ -1,4 +1,4 @@
-// Package grpcmiddleware 把 ratelimit 挂载为 gRPC 服务端拦截器(ROADMAP 3.2):
+// Package grpcmiddleware 把 ratelimit 挂载为 gRPC 服务端拦截器:
 // grpcx.NewServer(grpc.StatsHandler...) 同点位一行装配,grpcx 本体零改动。
 //
 // 两种限流维度装配(互斥,二选一):

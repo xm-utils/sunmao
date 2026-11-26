@@ -121,7 +121,7 @@ src.Close() // 幂等；终止所有 Watch
 ## 8. 验证
 
 ```bash
-cd registry && go test -race ./...   # 38 用例全绿
+cd registry && go test -race ./...   # 38 个用例
 ```
 
 下一步阅读：[README.md](README.md) —— API 参考、双后端差异语义矩阵、依赖与 replace 说明。

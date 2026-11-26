@@ -1,6 +1,6 @@
 # lock — 分布式互斥锁组件
 
-跨实例协同原语：**一个 `Mutex` 契约 + 进程内 / Redis / Consul 三类后端，租期与看门狗续期、try-lock、阻塞获取、goroutine 绑定重入、ctx 取消感知全部统一**。对应架构路线图 3.3.1（P1）。
+跨实例协同原语：**一个 `Mutex` 契约 + 进程内 / Redis / Consul 三类后端，租期与看门狗续期、try-lock、阻塞获取、goroutine 绑定重入、ctx 取消感知全部统一**。
 
 立项动因是仓库里已存在、但至今没有原语支撑的多实例竞争：
 
@@ -69,7 +69,7 @@ type Refresher interface { Refresh(ctx) error }       // 可选：手动续期�
 type Statser interface { Stats() Stats }              // 可选：运行快照（三端，接 metrics 采集器）
 ```
 
-契约方法**一律不 panic**：后端异常、内部脚本返回值异常、回调 panic 全部 recover 后包成 error（仓库设计约定二）。判定一律用 `errors.Is`，不要比对字符串。
+契约方法**一律不 panic**：后端异常、内部脚本返回值异常、回调 panic 全部 recover 后包成 error。判定一律用 `errors.Is`，不要比对字符串。
 
 拿到契约后最省事的用法是 `Do`——它把「谁加锁谁解锁」收敛成一次调用，错误分支与 panic 都会归还锁：
 
@@ -116,7 +116,7 @@ err := lock.Do(ctx, mu, func() error {
 | `OwnerFunc` | `GoroutineOwner` | 每次操作求值，优先级高于 `Owner` |
 | `OnRenewError` | nil | 续期失败回调（看门狗 goroutine 内调用，不可阻塞）；nil 时静默，仅 `Held()` 变 false |
 
-**默认 Owner 为什么是 goroutine 绑定**：`GoroutineOwner()` 返回 `<hostname>-<pid>-<8hex>-g<goid>`——进程前缀防止多进程 goid 串号误判重入，goid 让「同一 goroutine 递归加锁加深深度、跨 goroutine 仍需等待」成立，这正是路线图 3.3.1 要的「可重入（goroutine 绑定）」。推论：默认配置下**必须谁加锁谁在同一 goroutine 里解锁**，跨 goroutine 传递锁实例做解锁会拿到 `ErrNotHeld`；确需跨 goroutine 收尾（如统一的 `Close`）时组件仍会归还租约，不会白占到 TTL。
+**默认 Owner 为什么是 goroutine 绑定**：`GoroutineOwner()` 返回 `<hostname>-<pid>-<8hex>-g<goid>`——进程前缀防止多进程 goid 串号误判重入，goid 让「同一 goroutine 递归加锁加深深度、跨 goroutine 仍需等待」成立，这正是契约里「可重入（goroutine 绑定）」的含义。推论：默认配置下**必须谁加锁谁在同一 goroutine 里解锁**，跨 goroutine 传递锁实例做解锁会拿到 `ErrNotHeld`；确需跨 goroutine 收尾（如统一的 `Close`）时组件仍会归还租约，不会白占到 TTL。
 
 ## API 参考
 
@@ -400,22 +400,21 @@ docker run -d --name xmlock-consul-it -p 127.0.0.1:8500:8500 \
   hashicorp/consul:1.22.7 consul agent -dev -client 0.0.0.0 -config-dir=/consul/config
 ```
 
-## 已知边界与待办
+## 已知边界
 
-- **不做 Redlock 多节点算法**：`redisstore` 是单 Key（或同一 `{tag}` slot）方案，主从切换时理论上存在丢锁窗口。对强一致有要求的场景，用 `consulstore`（Raft 多数派）或等 `lock` 增加 `Multi` 聚合后端；
+- **不做 Redlock 多节点算法**：`redisstore` 是单 Key（或同一 `{tag}` slot）方案，主从切换时理论上存在丢锁窗口。对强一致有要求的场景，用 `consulstore`（Raft 多数派）；
 - **Cluster 只做到「用例可跑」而非「CI 常驻」**：`redisstore.Client` 已接受 `*redis.ClusterClient`，锁 Key 的 `{tag}` 也能保证两个 Key 同 slot，`TestIntegrationClusterScriptsAndSameSlot` 会用 `CLUSTER KEYSLOT` 核对同槽并跑一轮完整获取/释放；但 `miniredis` 不支持 `CLUSTER` 命令，该用例需要显式配 `XM_LOCK_TEST_REDIS_CLUSTER_ADDRS` 才生效，默认作业里不会跑——首次上 Cluster 前请实跑一次（并顺手跑 DDL 场景）；同理，`redis.Ring` 的一致性哈希由客户端控制，请确认 Key 真的落同一分片；
 - **等待不保证公平**：抖动轮询不排队，极端情况下某副本可能长时间抢不到。需要严格 FIFO 请自行用 Redis `BLPOP` 排队或在 `consul` 侧用 blocking query（后者不吃 ctx，取消语义会失真，故未采用）；
 - **`ErrLost` 只报告事实、不做补偿**：一旦出现说明临界区可能已并发执行，组件不会自动重跑，调用方必须按幂等设计任务；
 - **`Local` 无租期**：`TTL`/`RenewInterval` 只参与校验，持锁 goroutine 泄漏就永久阻塞同实例等待者——用它做初始化保护时要确保 `defer Unlock`；
-- **`consulstore` 无栅栏 token**：需要「旧持有者写入被拒」的场景请用 Redis，或等 `consul` 组件透出 `ModifyIndex`；
+- **`consulstore` 无栅栏 token**：需要「旧持有者写入被拒」的场景请用 Redis（递增计数随写提交）；
 - **Consul 服务端的 `session_ttl_min`（默认 10s）会抬高更小的 TTL**：把 `TTL` 配成 3s 并不会让崩溃回收变快，实际租约由服务端参数决定——要调快回收请改 Consul 的 `session_ttl_min`，而不是组件配置；
 - **崩溃交接 = TTL + `lock_delay`（实测约 15s）**：持有者未显式释放而会话被 TTL 回收时，Consul 会对该键施加会话的 `lock_delay`（默认 15s），期间他人 `Acquire` 一律返回 false。所以 `WaitTimeout` 要按「TTL + 15s」量级设，而不是只看 TTL；正常 `Unlock` 显式释放不触发该延迟，他人可立刻接手（集成用例已钉住两种路径）。想去掉这 15s 只能在自己创建的会话上设 `LockDelay=0`，需自备 `Backend` 实现（`consul` 组件的 `CreateSession` 不透出该字段）；
 - **`consulstore` 释放后 KV 不删**：`Release` 只解绑会话，锁键作为墓碑留下（值为上一个持有者的会话 ID）；静态 Key 下不会无限增长，但按日期/任务 ID 动态生成海量 Key 时需自行回收；
 - **`redisstore` 的栅栏计数 Key 常驻**：`xm_lock:{key}:fence` 不过期也不删除（单调性所需），每个锁 Key 对应一个极小 Key；动态创建海量锁 Key 的场景需自行回收；
 - **`consulstore` 等待期间每轮尝试建/销一次会话**：会话创建是 Raft 写，长时间 `Lock` 等待应上调 `PollInterval`（默认 100ms 对分钟级等待仍偏激进），能接受跳过就优先 `TryLock`；
 - **`redisstore` 每次获取一个 RTT**：跨机房部署时轮询等待会放大抖动，建议 `PollInterval` 上调（默认 100ms 起）并优先 `TryLock` 跳过；
-- **计数是累计值而非区间值**：`Stats()` 与 `xmt_lock_contention_ratio` 反映实例创建至今的总账，需要区间竞争率请对 `xmt_lock_operations_total` 做 `rate()` 推导；重启进程即归零，多副本聚合看指标时记得按 `instance` 维度分开；
-- 待办：`scheduler`（3.3.2）落地后把「选主执行」的锁调用收进调度器、`mq/redis/stream` pending 巡检启用时接入本组件。
+- **计数是累计值而非区间值**：`Stats()` 与 `xmt_lock_contention_ratio` 反映实例创建至今的总账，需要区间竞争率请对 `xmt_lock_operations_total` 做 `rate()` 推导；重启进程即归零，多副本聚合看指标时记得按 `instance` 维度分开。
 
 ## 许可
 

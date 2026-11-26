@@ -1,7 +1,7 @@
 // Package logging 提供全仓库统一的日志出口：logrus JSON 结构化封装、
 // traceId 自动附加与文件轮转输出。
 //
-// 设计要点（对应架构路线图 3.1.3）：
+// 设计要点：
 //   - 基于 logrus（与现仓库一致），不引入新日志链；Init 配置标准 logger，
 //     pipeline ExecContext.Logger() 等既有 logrus.StandardLogger() 使用点自动受益；
 //   - traceId 自动附加：Format 阶段从 entry.Context 提取 trace.TraceIDFromCtx，
@@ -295,7 +295,7 @@ func Service() string {
 	return state.Load().service
 }
 
-// LevelWatchKey 按仓库约定拼装动态调级配置键：/log/level/<service>。
+// LevelWatchKey 拼装动态调级配置键：/log/level/<service>。
 // 本包只提供键名约定与 SetLevel 应用端点，不监听任何配置源；
 // 使用方（装配层）监听该键并把变更值交给 SetLevel 应用，参考 README 示例。
 func LevelWatchKey(service string) string {

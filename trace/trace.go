@@ -1,7 +1,7 @@
 // Package trace 基于 OpenTelemetry 提供链路追踪与指标计量的初始化、
 // W3C traceparent 上下文跨进程传播的统一封装。
 //
-// 组件定位（见 ARCHITECTURE_ROADMAP.md 3.1.1/3.1.2）：
+// 组件定位：
 //   - Tracer / Meter 全局注册：Init 一次装配，业务经 Tracer()/Meter() 取用；
 //   - 上下文贯通辅助：Inject*/Extract* 覆盖 grpc metadata、HTTP Header、
 //     mq.Message.Headers 三类载体，传播格式统一为 W3C traceparent；

@@ -1,4 +1,4 @@
-// Package redisstore 提供 ratelimit 的 Redis 后端(ROADMAP 3.2):
+// Package redisstore 提供 ratelimit 的 Redis 后端:
 // 令牌扣减经 Lua 脚本在服务端原子执行,多实例共享同一份额额,消除本地
 // Local 后端"每进程各算各的"放大问题。
 //

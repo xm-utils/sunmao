@@ -635,7 +635,7 @@ func TestBackendPanicBecomesError(t *testing.T) {
 		m := newFakeMutex(t, f, "worker-1", lock.Config{TTL: 30 * time.Second, WaitTimeout: 20 * time.Millisecond, PollInterval: time.Millisecond})
 		ctx := context.Background()
 
-		// 设计约定二:panic 一律转 error, 调用方不能被库炸掉
+		// panic 一律转 error, 调用方不能被库炸掉
 		requireNoPanic(t, fmt.Sprintf("%s TryLock", op), func() error { return m.TryLock(ctx) })
 		requireNoPanic(t, fmt.Sprintf("%s Lock", op), func() error { return m.Lock(ctx) })
 	}

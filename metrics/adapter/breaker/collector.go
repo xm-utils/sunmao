@@ -2,7 +2,7 @@
 // CircuitBreakerManager 聚合快照）适配为统一注册表可收录的 prometheus.Collector。
 //
 // 拉取式设计：每次抓取时实时读快照，不改动、不包装熔断器本体；
-// breaker 组件零依赖本包（适配器模式，见架构路线图 3.1.2 兼容策略）。
+// breaker 组件零依赖本包（适配器模式，不改动本体）。
 package breaker
 
 import (

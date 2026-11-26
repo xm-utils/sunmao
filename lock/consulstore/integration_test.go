@@ -14,7 +14,7 @@
 //   - Session().Renew 对已失效会话返回 (nil, nil) 而不是 error,
 //     判失效统一走 itSessionGone,不能只看 err。
 //
-// 环境不可用时 t.Skip,不判失败(仓库约定:不带标签的 go test 永远绿)。
+// 环境不可用时 t.Skip,不判失败:不带 integration 标签的 go test 不依赖外部 Consul。
 //
 // 环境变量:
 //

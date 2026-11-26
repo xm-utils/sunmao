@@ -1,4 +1,4 @@
-// Package redisstore 提供 lock 的 Redis 后端(ROADMAP 3.3.1):
+// Package redisstore 提供 lock 的 Redis 后端:
 // SetNX 语义的互斥锁 + Owner 属主校验 + 服务端深度计数,多实例共享同一把锁。
 //
 // 复用仓库 redis 组件的方式与 ratelimit/redisstore 一致:连接管理沿用其
@@ -427,7 +427,7 @@ func (m *Mutex) RemainingTTL(ctx context.Context) (time.Duration, error) {
 // attempt 一次服务端获取尝试:执行脚本并按返回码更新本地属主视图,
 // 首次真正获得时启动看门狗。
 func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
-	// 设计约定二:后端异常不得以 panic 形式逃逸。TryLock 直接调用本方法,
+	// 后端异常不得以 panic 形式逃逸。TryLock 直接调用本方法,
 	// 故在此兜住;Lock 路径另有 WaitAcquire 一层的隔离。
 	defer func() {
 		if r := recover(); r != nil {

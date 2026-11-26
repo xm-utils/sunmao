@@ -1,6 +1,6 @@
 # ratelimit — 限流与降级组件
 
-主动流量防护：**三种限流算法共用一个 `Limiter` 契约 + 本地内存/Redis 两类后端 + gRPC/HTTP 入口中间件**。对应架构路线图 3.2（P0）。
+主动流量防护：**三种限流算法共用一个 `Limiter` 契约 + 本地内存/Redis 两类后端 + gRPC/HTTP 入口中间件**。
 
 与 `breaker` 的分工：`breaker` 是"被动逃生"（依赖已劣化才熔断），本组件是"主动防护"——入口流量超标时保护自身，出口调用时约束自我频率。
 
@@ -355,7 +355,7 @@ metrics.Register(rlmetrics.NewWithProvider(fn))     // 自定义快照源（多�
 | 组件 | 方式 |
 |---|---|
 | `redis` | 可沿用其配置形态（host/password/dbNum）；因组件 `client` 未导出且全局 `Eval` 有 KEYS 双前缀缺陷，`redisstore` 直接接收使用方持有的 `*redis.Client` 执行脚本，不改组件本体 |
-| `grpcx` | 拦截器经标准 `grpc.ServerOption` 拼装，`grpcx` 零改动（ROADMAP 第四阶段若落地 `WithRateLimit` 一行装配，再评估收编本子包入口） |
+| `grpcx` | 拦截器经标准 `grpc.ServerOption` 拼装，`grpcx` 零改动（若后续 `grpcx` 提供 `WithRateLimit` 一行装配，再评估收编本子包入口） |
 | `httpclient` | 出口自我限速用 `LeakyBucket.Wait(ctx, n)` 包住调用；`httpclient` 本体零改动 |
 | `breaker` | 分工互补：本组件主动拒、`breaker` 被动熔断。**已联动**：`alert` 子包差分拒绝率快照，超阈值产出 `breaker.AlertEvent` 进其告警通道；降级兜底可直接复用 `breaker` 的 `FallbackFunc` 体系 |
 | `metrics` | **已接入**：`metrics/adapter/ratelimit` 拉取式适配器读 `Local.Snapshots`，产出 `xmt_ratelimit_*`；本组件零依赖 `metrics`，根包零依赖不变 |
@@ -374,15 +374,14 @@ GOWORK=off go test -race -count=2 ./...
 - 中间件用例覆盖超限拒绝码、trailer/header、`FailOpen`、直通 Key；
 - `alert` 用例覆盖首轮基线不告警、阈值/样本量边界、冷却期、计数回拨与 Key 消失、回调/快照源 panic 隔离、并发 `Check`（`-race`）。
 
-## 已知边界与待办
+## 已知边界
 
-- **`Local` 只惰性创建令牌桶**：按 Key 用滑窗/漏桶需使用方自持实例（后续可给 `LocalConfig` 加算法选择或 `Factory` 钩子）；
+- **`Local` 只惰性创建令牌桶**：按 Key 用滑窗/漏桶需使用方自持实例；
 - **Redis 后端只有令牌桶**：滑窗/漏桶尚无 Lua 实现，多实例全局配额需精确计数时暂用"令牌桶 + 合理 Burst"近似；
 - **`redisstore` 每次判定一个 RTT**：热点接口建议本地 `Local` 先挡一层，或按 `Key` 分片降低单 Key 争用；
 - **时钟回拨防御是"不倒扣"而非"回滚"**：跨实例存在时钟漂移时，各实例独立钳制，不追求绝对一致；
 - **计数不跨进程**：`Local` 的判定计数与告警巡检均为单进程视图，多副本需各自部署 `alert.Watcher`（或改用指标侧 `rate()` 做聚合告警）；
-- **告警不自动接 `breaker.AlertManager`**：`AlertManager.RegisterBreaker` 只接熔断器实例，本包产出事件由使用方透传至实际出口（webhook / IM / 日志），避免反向侵入熔断器监控循环；
-- 待办：规则热更新的配置源监听装配（`registry/config.Watch` → `Local.Update`）、`redisstore` 侧指标快照、滑窗/漏桶的 Redis 后端。
+- **告警不自动接 `breaker.AlertManager`**：`AlertManager.RegisterBreaker` 只接熔断器实例，本包产出事件由使用方透传至实际出口（webhook / IM / 日志），避免反向侵入熔断器监控循环。
 
 ## 许可
 

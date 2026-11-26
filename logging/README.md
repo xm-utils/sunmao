@@ -1,6 +1,6 @@
 # logging — 统一日志出口组件
 
-基于 logrus 的全仓库统一日志封装：**JSON 结构化输出 + traceId 自动附加 + 文件轮转输出 + 可调级标准抽象**。对应架构路线图 3.1.3。
+基于 logrus 的全仓库统一日志封装：**JSON 结构化输出 + traceId 自动附加 + 文件轮转输出 + 可调级标准抽象**。
 
 - 模块路径：`github.com/xm-utils/sunmao/logging`
 - 技术选型：`logrus`（与现仓库一致，不引入新日志链）+ `lumberjack`（文件按大小轮转）；traceId 提取依赖 `trace` 组件
@@ -141,12 +141,8 @@ err = logging.Close()              // 关闭文件句柄恢复 stderr（幂等�
 
 1. **标准 logger 装配点**：`Init` 只配置 `logrus.StandardLogger()` 的 Formatter/级别/Caller，不新建 Logger 实例——保证 pipeline `ExecContext.Logger()`、各组件内部 logrus 用法统一出口；代价是全局单例，多引擎隔离场景请业务自备 logger。
 2. **动态读取配置**：`service`/`trace_key` 存于 `atomic.Pointer` 状态，formatter 每次格式化实时读取，`Init` 重建后已分发的 Entry 自动跟随。
-3. **依赖收敛**：traceId 提取只依赖 `trace.TraceIDFromCtx`（会传递引入 otel 链，trace 固有代价，见架构决策）；除 trace 外零仓内依赖——不引用 `registry/config`，避免 logging↔registry 的模块互依赖与潜在环，监听策略（重试/回退/幂等）归装配层自定。
+3. **依赖收敛**：traceId 提取只依赖 `trace.TraceIDFromCtx`（会传递引入 otel 链，trace 固有代价）；除 trace 外零仓内依赖——不引用 `registry/config`，避免 logging↔registry 的模块互依赖与潜在环，监听策略（重试/回退/幂等）归装配层自定。
 4. **panic 转 error**：`Init` / `SetLevel` 全部返回 error；日志写入链（formatter 合并失败降级原样输出）无 panic 面。
-
-## 开发状态
-
-- 已发布 `logging/v0.1.0`。对 `trace` 的引用按 main commit pseudo-version，无 replace，可独立 `go get github.com/xm-utils/sunmao/logging`；不依赖 registry。
 
 ## 测试
 

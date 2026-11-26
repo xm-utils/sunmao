@@ -1,4 +1,4 @@
-// Package ratelimit 提供限流与降级能力(ROADMAP 3.2):主动流量防护,
+// Package ratelimit 提供限流与降级能力:主动流量防护,
 // 入口流量超标时保护自身、出口调用时约束自我频率。
 //
 // 三种算法共用 Limiter 契约,按场景选取:

@@ -1,4 +1,4 @@
-// Package lock 提供跨实例互斥的统一契约与多后端实现(ROADMAP 3.3.1)。
+// Package lock 提供跨实例互斥的统一契约与多后端实现。
 //
 // 立项动因是组件内已出现、但至今无原语支撑的多实例竞争场景:
 //
@@ -52,7 +52,7 @@ var (
 // Mutex 是分布式互斥锁的统一契约。实例与一个 Key 一一绑定,可被多个 goroutine
 // 并发使用;Lock/TryLock 成功即进入临界区,必须成对 Unlock。
 //
-// 三个方法都不 panic:内部异常一律 recover 后包装为 error 返回(仓库设计约定)。
+// 三个方法都不 panic:内部异常一律 recover 后包装为 error 返回。
 type Mutex interface {
 	// Lock 阻塞获取锁,直到成功、被 ctx 取消/超时、达到 WaitTimeout 或后端故障。
 	// 等待失败返回包装 ErrTimeout 的 error;同 Owner 重入时直接加深计数返回 nil。
@@ -100,7 +100,7 @@ type Refresher interface {
 // 不提供时间源抽象:锁的租期由服务端计时(Redis PEXPIRE / Consul Session TTL),
 // 本地只负责等待与续期调度;测试的确定性入口是 Watchdog.Tick。
 
-// 默认值:与 roadmap 3.3.1 草案一致,30s 租期对 DDL/恢复类任务足够宽,
+// 默认值取 30s 租期,对 DDL/恢复类任务足够宽,
 // 又能在持有者崩溃时于半分钟内恢复可用。
 const (
 	defaultTTL          = 30 * time.Second
@@ -135,7 +135,7 @@ type Config struct {
 	// 需跨实例共享重入语义时才建议显式设置
 	Owner string
 	// OwnerFunc 每次获取时求值 Owner,优先级高于 Owner。
-	// 默认(Owner 与 OwnerFunc 均为空)取 GoroutineOwner,即 roadmap 3.3.1 的
+	// 默认(Owner 与 OwnerFunc 均为空)取 GoroutineOwner,自带
 	// 「可重入(goroutine 绑定)」:同一 goroutine 递归加锁加深深度,
 	// 跨 goroutine 仍需等待;如需关闭重入语义,设为返回固定随机串的函数即可
 	OwnerFunc func() string
@@ -187,7 +187,7 @@ func (c *Config) normalize() error {
 			ErrInvalidConfig, c.RenewInterval, c.TTL)
 	}
 	if c.Owner == "" && c.OwnerFunc == nil {
-		// 默认 goroutine 绑定:同 goroutine 可重入、跨 goroutine 互斥(ROADMAP 3.3.1)
+		// 默认 goroutine 绑定:同 goroutine 可重入、跨 goroutine 互斥
 		c.OwnerFunc = GoroutineOwner
 	}
 	return nil

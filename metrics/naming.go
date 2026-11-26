@@ -1,6 +1,6 @@
 // Package metrics 提供全仓库统一的指标出口：集中注册表、命名规范与 /metrics HTTP 暴露。
 //
-// 设计要点（对应架构路线图 3.1.2）：
+// 设计要点：
 //   - 统一注册表：所有组件指标注册进同一个 prometheus.Registry，Handler() 一站式暴露；
 //   - 命名规范：指标全名一律 <namespace>_<component>_<name>，默认前缀 xmt，如 xmt_breaker_requests_total；
 //   - 兼容策略：不删除、不修改各组件既有 metrics.go 的私有指标实现，跨组件接入一律走

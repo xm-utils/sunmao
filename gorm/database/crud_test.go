@@ -264,7 +264,7 @@ func TestUpdateModelByCondition(t *testing.T) {
 	}
 }
 
-// TestFindListAndCountEmptyConditionGuard 验证 P2-2：FindList/Count 传入非 nil 的空 Condition 时
+// TestFindListAndCountEmptyConditionGuard 验证 FindList/Count 传入非 nil 的空 Condition 时
 // 应短路不拼 WHERE，与传 nil 行为一致（返回全量），且非空条件仍正常生效。
 func TestFindListAndCountEmptyConditionGuard(t *testing.T) {
 	gdb := openTestDB(t)

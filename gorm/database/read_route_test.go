@@ -88,7 +88,7 @@ func TestReadOneByCondition(t *testing.T) {
 	}
 }
 
-// TestReaderNilDBReturnsErrorNotPanic 验证 P2-3：数据库未初始化时 Reader 各方法不再 panic，
+// TestReaderNilDBReturnsErrorNotPanic 验证数据库未初始化时 Reader 各方法不再 panic，
 // 而是返回清晰 error（带 error 的读方法）或 nil（ReadOne/FindOne）。
 func TestReaderNilDBReturnsErrorNotPanic(t *testing.T) {
 	restore := db

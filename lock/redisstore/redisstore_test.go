@@ -111,7 +111,7 @@ func TestClientInterfaceAcceptsConcreteClients(t *testing.T) {
 }
 
 // TestTypedNilClientBecomesError 保证「接口里装了类型化空指针」这类
-// 构造期判不出的误用不会以 panic 形式逃逸(设计约定二)。
+// 构造期判不出的误用也不得以 panic 形式逃逸给调用方。
 func TestTypedNilClientBecomesError(t *testing.T) {
 	var typed *redis.Client // 非 nil 接口值: New 的 nil 判不到
 	m, err := New(Config{Client: typed, Config: lock.Config{Key: "test:lock"}})

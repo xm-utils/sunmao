@@ -115,9 +115,8 @@ type ConfigSource interface {
 
 ## 依赖与构建说明
 
-- 基座依赖：`github.com/xm-utils/sunmao/consul`（已发布 `consul/v1.0.0` tag）、`github.com/xm-utils/sunmao/nacos`（已发布 `nacos/v1.0.0` tag），均直接按版本引用，无仓内 replace。
+- 基座依赖：`github.com/xm-utils/sunmao/consul` v0.0.2、`github.com/xm-utils/sunmao/nacos` v0.0.1，均按正式版本引用。
 - 本模块 go.mod 仅保留一条 `replace`：`genproto => v0.0.0-20241118…`，把整体式 genproto 钉到 2023-05 拆分后的版本，消除与 `genproto/googleapis/rpc` 的 `rpc/status` 包歧义。用 replace 而非 require 钉版，因为 require 会被 `go mod tidy` 剪除（无包直接引用它）。
-- 本地改动联动由根目录 `go.work` 负责（不提交）；无 go.work 的独立构建（CI 等）按已发布版本解析。
 - go 指令与本仓库所有组件统一为 1.24.2。
 
 ## 测试

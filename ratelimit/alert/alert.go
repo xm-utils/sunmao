@@ -1,4 +1,4 @@
-// Package alert 提供 ratelimit → breaker 告警通道的联动桥(ROADMAP 3.2 联动项):
+// Package alert 提供 ratelimit → breaker 告警通道的联动桥:
 // 周期性差分 Local 的判定计数快照,某 Key 在巡检间隔内的限流拒绝率持续超阈值时,
 // 产出告警事件并投递到 breaker 的告警体系(breaker.AlertEvent / AlertCallback)。
 //

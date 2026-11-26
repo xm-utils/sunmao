@@ -1,13 +1,12 @@
 # trace — 链路追踪与指标计量组件
 
-基于 **OpenTelemetry** 的统一封装：`Init` 一次装配全局 TracerProvider / MeterProvider / 传播器，`Inject*` / `Extract*` 覆盖 gRPC metadata、HTTP Header、MQ 消息头三类载体，并把拦截器与中间件内置在本组件，使业务与其他组件**无需 import otel 类型**即可贯通全链路。对应架构路线图 3.1.1 / 3.1.2。
+基于 **OpenTelemetry** 的统一封装：`Init` 一次装配全局 TracerProvider / MeterProvider / 传播器，`Inject*` / `Extract*` 覆盖 gRPC metadata、HTTP Header、MQ 消息头三类载体，并把拦截器与中间件内置在本组件，使业务与其他组件**无需 import otel 类型**即可贯通全链路。
 
 - 模块路径：`github.com/xm-utils/sunmao/trace`
 - 技术选型：`go.opentelemetry.io/otel` v1.34.0 全家桶（sdk / sdk/metric / otlptracegrpc / otlpmetricgrpc / stdouttrace / stdoutmetric）+ `google.golang.org/grpc` v1.71.1（仅为 metadata 与拦截器类型）
 - **不引入 `otelgrpc` / `otelhttp`**：gRPC 拦截器与 HTTP RoundTripper 全部自写适配（含 otel 官方缺失的 `mdCarrier`），避免新增两条 contrib 依赖链
 - 零行为契约：**未调用 `Init` 时全局为 noop Provider 与空传播器**，所有拦截器、注入提取、取 ID 的函数均安全退化，接入代码可无条件常驻，业务无需判空
 - 仓内依赖方向：**trace 不依赖任何仓内模块**，被 `grpcx`、`httpclient`、`logging`、`metrics`、`mq/kafka`、`mq/redis` 依赖
-- 发布状态：**尚未打 tag**，上述消费方目前以临时 `replace ../trace` 引用；发 `trace/v0.1.0` 后应转 pseudo-version 并删除 replace
 
 ## 目录结构
 
@@ -202,7 +201,7 @@ MQ 适配器内置 Span 的 tracer 名是各包的包级常量（如 `mq/kafka`�
 - `Exporter=none` 时仍注册 SDK TracerProvider：**TraceID/SpanID 正常生成与传播**，仅不外送数据，适合本地开发与未接观测后端的部署（日志关联照常可用）。
 - 远端动态采样（按 Collector 下发的策略）**尚未实现**，需要时应在 `Init` 之外自行装配 Provider。
 
-## 已知边界与待办
+## 已知边界
 
 | 项 | 现状 | 影响 |
 |----|------|------|
@@ -210,7 +209,6 @@ MQ 适配器内置 Span 的 tracer 名是各包的包级常量（如 `mq/kafka`�
 | URL 属性未脱敏 | 客户端 Span 记 `url.full`（含 query） | query 中带 token / 手机号等敏感参数会进观测后端，需在上层自控 |
 | 无 Span 过滤/白名单 | 所有请求一律开 Span（仅采样率可调） | 健康检查、metrics 抓取等噪音链路需业务侧自行跳过 |
 | MQ span 动词不统一 | `mq/redis/pubsub` 用 `publish`，其余后端用 `produce` | 按 span 名做聚合看板时需兼顾两种写法 |
-| 未发布 tag | 六个消费方仍是 `replace ../trace` | 发 `trace/v0.1.0` 后须逐个转 pseudo-version |
 | 无 README 之外的示例程序 | 本目录未提供 `example.go` | 可运行示例见 QUICKSTART 的三步最小工程 |
 
 ## 测试

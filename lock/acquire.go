@@ -85,7 +85,7 @@ func waitInterrupted(parent, waitCtx context.Context, cfg *Config) error {
 	return nil
 }
 
-// callAttempt 隔离后端尝试里的 panic,转为 error(仓库设计约定:对外不抛 panic)
+// callAttempt 隔离后端尝试里的 panic,转为 error(对外 API 不抛 panic)
 func callAttempt(attempt Attempt, ctx context.Context) (acquired, busy bool, err error) {
 	defer func() {
 		if r := recover(); r != nil {

@@ -1,4 +1,4 @@
-// Package httpmiddleware 把 ratelimit 挂载为 HTTP 入口中间件(ROADMAP 3.2):
+// Package httpmiddleware 把 ratelimit 挂载为 HTTP 入口中间件:
 // 基于 net/http 标准 Handler 包装,纯 HTTP 服务直接 Wrap;
 // Gin/grpcx cmux HTTP 端口经 engine.Use(gin.WrapH(Wrap(limiter))) 装配,
 // httpclient/grpcx 本体零改动。

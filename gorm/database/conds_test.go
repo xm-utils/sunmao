@@ -153,7 +153,7 @@ func TestConditionFluentCombine(t *testing.T) {
 	}
 }
 
-// TestConditionLikeEscapeSpecialChars 验证 P1-3：LIKE 值中的 % _ \ 被转义为字面量，
+// TestConditionLikeEscapeSpecialChars 验证 LIKE 值中的 % _ \ 被转义为字面量，
 // 两侧通配符不转义，避免用户输入中的通配符误参与模式匹配。
 func TestConditionLikeEscapeSpecialChars(t *testing.T) {
 	cases := []struct {

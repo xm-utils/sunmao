@@ -360,7 +360,7 @@ func TestConfigCompilation(t *testing.T) {
 	})
 }
 
-// TestCompileSnowflakeShardsLimit 验证 P2-4：NumberOfShards 超限（>1024）且为 PKSnowflake 时，
+// TestCompileSnowflakeShardsLimit 验证 NumberOfShards 超限（>1024）且为 PKSnowflake 时，
 // compile() 返回 error 而非 panic；边界值 1024 不应报错。
 func TestCompileSnowflakeShardsLimit(t *testing.T) {
 	build := func(shards uint) *Sharding {
@@ -384,7 +384,7 @@ func TestCompileSnowflakeShardsLimit(t *testing.T) {
 		if err == nil {
 			t.Fatal("NumberOfShards>1024 且 PKSnowflake 时 compile 应返回 error")
 		}
-		// P2-6：边界为 >1024（允许 1024），文案应为「not exceed 1024」且带上出错表名
+		// 边界为 >1024（允许 1024），文案应为「not exceed 1024」且带上出错表名
 		if !strings.Contains(err.Error(), "should not exceed 1024") {
 			t.Errorf("错误文案应包含 'should not exceed 1024'，实际=%q", err.Error())
 		}
@@ -457,7 +457,7 @@ func TestTimeStringParsing(t *testing.T) {
 	}
 }
 
-// TestCompileModulusShardSuffixWidth 验证 P1-1：取模分片后缀宽度按 NumberOfShards 位数动态生成，
+// TestCompileModulusShardSuffixWidth 验证取模分片后缀宽度按 NumberOfShards 位数动态生成，
 // 修复旧实现 NumberOfShards>=10000 时 tableFormat 为空、后缀恒为空串导致数据静默误落基表的缺陷。
 func TestCompileModulusShardSuffixWidth(t *testing.T) {
 	build := func(shards uint) Config {
@@ -507,7 +507,7 @@ func TestCompileModulusShardSuffixWidth(t *testing.T) {
 	}
 }
 
-// TestTimeRangeNonInsertValueRangeOps 验证 P1-2：时间范围分片路由识别 >=、<=、>、<、BETWEEN，
+// TestTimeRangeNonInsertValueRangeOps 验证时间范围分片路由识别 >=、<=、>、<、BETWEEN，
 // 取比较值（BETWEEN 取下界）正确路由到对应时间分片表。
 func TestTimeRangeNonInsertValueRangeOps(t *testing.T) {
 	s := Register(Config{
@@ -548,7 +548,7 @@ func TestTimeRangeNonInsertValueRangeOps(t *testing.T) {
 	}
 }
 
-// TestResolvePrimaryKeyGeneratorPanicToError 验证 P2-4：主键生成回调 panic 时，
+// TestResolvePrimaryKeyGeneratorPanicToError 验证主键生成回调 panic 时，
 // resolve 应将其转为 error 返回，而不是让 panic 沿 ConnPool 执行链冒泡。
 func TestResolvePrimaryKeyGeneratorPanicToError(t *testing.T) {
 	s := Register(Config{
@@ -576,7 +576,7 @@ func TestResolvePrimaryKeyGeneratorPanicToError(t *testing.T) {
 	}
 }
 
-// TestShardingBindArgOutOfRangeNoPanic 验证 P2-5：insertValue / nonInsertValue 的 id 路径
+// TestShardingBindArgOutOfRangeNoPanic 验证 insertValue / nonInsertValue 的 id 路径
 // 对 BindExpr.Pos 越界做防护，异常 SQL 下返回明确 error 而非触发 index out of range panic。
 func TestShardingBindArgOutOfRangeNoPanic(t *testing.T) {
 	s := Register(Config{

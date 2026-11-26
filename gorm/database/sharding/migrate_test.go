@@ -18,7 +18,7 @@ type migrateOrder struct {
 
 func (migrateOrder) TableName() string { return "orders" }
 
-// TestTimeRangeAutoMigrateSuffixFallback 验证 P2-1：time_range 分片在未提供 ShardingSuffixs 时，
+// TestTimeRangeAutoMigrateSuffixFallback 验证 time_range 分片在未提供 ShardingSuffixs 时，
 // splitShardingDsts 应回退生成「当前周期」分片表，而非报 suffixs is empty 使 AutoMigrate 失败。
 func TestTimeRangeAutoMigrateSuffixFallback(t *testing.T) {
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{

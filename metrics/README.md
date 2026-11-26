@@ -1,6 +1,6 @@
 # metrics — 统一指标出口组件
 
-全仓库统一的 Prometheus 指标出口：**集中注册表 + `xmt_<component>_<name>` 命名规范 + `/metrics` HTTP Handler + 组件私有指标适配器**。对应架构路线图 3.1.2。
+全仓库统一的 Prometheus 指标出口：**集中注册表 + `xmt_<component>_<name>` 命名规范 + `/metrics` HTTP Handler + 组件私有指标适配器**。
 
 - 模块路径：`github.com/xm-utils/sunmao/metrics`
 - 技术选型：`prometheus/client_golang`（v1.22.0），不引入其他指标链
@@ -179,19 +179,7 @@ metrics.Register(lockmetrics.NewWithProvider(func() map[string]xmlock.Stats {
 1. **拉取式适配器**：适配器不包装、不拦截组件写入路径，仅在抓取瞬间读快照——组件私有 `metrics.go` 保持原语义，独立可引。
 2. **零全局副作用**：本包不写 `prometheus.DefaultRegisterer`；需要使用默认注册表的场景请 `metrics.Registry()` 取表自行桥接。
 3. **panic 转 error**：`Register` / `RegisterExporter` / 各构造器全部返回 error；`Init` 非法前缀报错并保持原配置。
-4. **与 trace 的关系**：metrics 是 P0 可观测性第二块；`/metrics` 端点复用 `grpcx` cmux HTTP 端口或 `httpclient` server 侧，无需新端口。
-
-## 开发状态
-
-- `github.com/xm-utils/sunmao/trace` 尚未发布 tag，`go.mod` 中临时 `replace ../trace`（经 mq/kafka 间接依赖）；trace 发版后删除该 replace 并转 pseudo-version。
-- `github.com/xm-utils/sunmao/ratelimit` 亦未发 tag：`go.mod` 以 pseudo-version 引用（不留 replace），
-  当前指向含 `Local.Snapshots` / `KeySnapshot` 的 `1728355`，`GOWORK=off` 可独立构建；
-  ratelimit 接口后续变更时，需先 `go get github.com/xm-utils/sunmao/ratelimit@<commit>` 再 tidy
-  （tidy 仅保证 import 可解析，不会自动升级已有 requirement）；ratelimit 发版后可转正式 tag。
-- `github.com/xm-utils/sunmao/lock` 同样未发 tag：适配器在工作区内可直接编译，但 `go.mod` 里还没有
-  lock 的 requirement，`GOWORK=off` 下 `metrics/adapter/lock` 解析不到该模块——待 lock 推送到远程后
-  `go get github.com/xm-utils/sunmao/lock@<commit>` + `go mod tidy` 收尾（与 ratelimit 同一路径）。
-- 本模块未打 tag；接口冻结后发布 `metrics/v0.1.0`。
+4. **与 trace 的关系**：metrics 是可观测性三件套的第二块；`/metrics` 端点复用 `grpcx` cmux HTTP 端口或 `httpclient` server 侧，无需新端口。
 
 ## 测试
 

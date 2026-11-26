@@ -1,4 +1,4 @@
-// Package consulstore 提供 lock 的 Consul 后端(ROADMAP 3.3.1):
+// Package consulstore 提供 lock 的 Consul 后端:
 // Session + KV 锁——以 Session 存活作为租约,持有者进程崩溃后会话 TTL 到期,
 // Consul 自动释放其占用的 KV,他人即可抢占。
 //
@@ -336,7 +336,7 @@ func (m *Mutex) Refresh(ctx context.Context) error {
 // attempt 一次获取尝试:先按本地 Owner 拦掉跨 goroutine 误重入,
 // 首次获得时建会话并 Acquire KV,重入只加深度并顺带续期。
 func (m *Mutex) attempt(ctx context.Context) (acquired, busy bool, err error) {
-	// 设计约定二:Backend 实现(包括传入的 *consul.Client)不得以 panic 形式
+	// Backend 实现(包括传入的 *consul.Client)不得以 panic 形式
 	// 逃逸给调用方——TryLock 直接调用本方法,故在此兜住。
 	defer func() {
 		if r := recover(); r != nil {

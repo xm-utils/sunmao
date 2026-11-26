@@ -2,7 +2,7 @@
 // 适配为统一注册表可收录的 prometheus.Collector。
 //
 // 拉取式设计：每次抓取时实时调用 GetStats（含 Redis 队列长度与存储层统计），
-// 不改动管理器本体；deadletter 组件零依赖本包（适配器模式，见路线图 3.1.2）。
+// 不改动管理器本体；deadletter 组件零依赖本包（适配器模式，本体无需感知）。
 // panic 安全：GetStats 依赖外部 Redis 与存储层，任一未初始化都会 panic
 // （go-redis nil client / nil store 接口），适配器以 recover 兜底并经
 // InvalidMetric 上报为抓取错误，不击穿抓取方。

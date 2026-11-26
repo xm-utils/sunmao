@@ -2,7 +2,7 @@
 
 目标：5 分钟把链路追踪跑起来并看到 Span，然后按需要在 gRPC / HTTP / MQ 三个入口贯通。
 
-前置：Go 1.24.2+；`trace` 尚未打 tag，仓外项目引用需临时 `replace github.com/xm-utils/sunmao/trace => ../trace`（仓内 go.work 联调无需处理）。
+前置：Go 1.24.2+；仓外项目直接 `go get github.com/xm-utils/sunmao/trace`。
 
 ## 第 1 步：最小可跑（stdout 导出，零外部依赖）
 
