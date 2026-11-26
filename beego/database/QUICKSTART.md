@@ -1,6 +1,6 @@
 # 快速开始
 
-> 5 分钟跑通基于 beego orm 的泛型 CRUD。完整能力见 [README](./)。
+> 5 分钟跑通基于 beego orm 的泛型 CRUD。完整能力见 [README.md](./README.md)。
 
 ## 1. 引入模块
 
@@ -50,7 +50,7 @@ func main() {
 }
 ```
 
-配置字段与结构体 tag 的对应关系见 [config.example.yaml](./config)。
+配置字段与结构体 tag 的对应关系见 [config.example.yaml](./config.example.yaml)。
 
 ## 3. 增删改查
 
@@ -137,5 +137,5 @@ err = tx.Execute(func(o orm.TxOrmer) error {
 
 ## 下一步
 
-- 全部 API 与边界：[README](./)
-- 配置模板：[config.example.yaml](./config)
+- 全部 API 与边界：[README.md](./README.md)
+- 配置模板：[config.example.yaml](./config.example.yaml)

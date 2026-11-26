@@ -5,7 +5,6 @@
 ## 📋 目录
 
 - [项目简介](#-项目简介)
-- [与 gorm/database 的关系](#-与-gormdatabase-的关系)
 - [安装](#-安装)
 - [快速开始](#-快速开始)
 - [核心功能](#-核心功能)
@@ -25,21 +24,6 @@
 为仍在使用 beego orm 的服务提供与 `gorm/database` 一致的泛型数据访问手感：统一的 `Ctx[T](ctx)` 链式构造器 + 同名包级函数、`panic` 一律转为 `error`、条件为空时拒绝全表更新与删除。
 
 业务代码在本模块与 `gorm/database` 之间迁移时，只有条件类型（`*orm.Condition` ↔ `*database.Condition`）与事务句柄（`orm.TxOrmer` ↔ `*gorm.DB`）两处需要改写，方法名、参数顺序与返回契约保持一致。
-
-## ✨ 与 gorm/database 的关系
-
-| 能力 | gorm/database | beego/database |
-|---|---|---|
-| 包级函数 | `ReadOne/FindOne/FindAll/FindList/Count/Insert/InsertBatch/Update/UpdateModel/UpdateByCondition/Delete/DeleteByCondition/Exec/Raw` | 同名同序，逐一行委托给构造器 |
-| 链式构造器 | `Ctx[T](ctx)` | `Ctx[T](ctx)` |
-| 条件类型 | 自带 `*Condition`（`Eq/In/Like/Between…`） | 沿用 beego `*orm.Condition` |
-| 分页/时间契约 | `PageParam`/`TimeParam` 接口 | 同名接口，`*common.PageParam`、`*common.TimeParam` 直接满足 |
-| 时间区间语义 | `>= start AND < end`，列名取自 `TimeParam.GetColumn()` | `>= start AND <= end`（纯日期补到当天 23:59:59），列名取自 `ListParam.TimeColumn` |
-| `ReadOne` 语义 | 按结构体**非零字段**作为条件查询 | 按**主键**读取（beego `Read` 语义），未命中均返回 `(nil, nil)` |
-| `Update` 写入范围 | 仅写非零字段（`Updates`） | 写全字段，或用 columns 指定列；需增量语义请用 `UpdateModel` |
-| 读写分离 | `Primary()/Replica()` + DBResolver | 不提供，多库靠 `db_alias` 与 `orm.NewOrmUsingDB` |
-| 事务 | `Transaction(fn)` / `NewTx().Execute(f)` | 同名同形，句柄为 `orm.TxOrmer` |
-| 建表 | 依赖 `AutoMigrate` | 依赖 `orm.RunSyncdb` |
 
 ## 🚀 安装
 
