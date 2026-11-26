@@ -27,6 +27,8 @@ github.com/xm-utils/sunmao/breaker v0.0.2 h1:i3SUJlVwtULsbq2OHGErUugwOcVsnUz/Cce
 github.com/xm-utils/sunmao/breaker v0.0.2/go.mod h1:wSD+tJF0jZ5glv/sL2oAIqiK1BjfJmU/TyQBaXbtSm4=
 github.com/xm-utils/sunmao/retry v0.0.2 h1:bVwB3oILNX0Yr/4ssc7IyS0lYrynXtYzbLGH4LbMw10=
 github.com/xm-utils/sunmao/retry v0.0.2/go.mod h1:jIYoQa/UQ2VoAkpqJ23/DUVDfsh7xCd5JEKy2vkGLLE=
+github.com/xm-utils/sunmao/trace v0.0.1 h1:EACMLKTuCc7y37DVoXIJVhiFmHIm9zlX4ILTjTdAd/A=
+github.com/xm-utils/sunmao/trace v0.0.1/go.mod h1:0LZe4rAo8FBiRPrrlsbGQDly+gJ3GcbiS18t2rKksUE=
 go.opentelemetry.io/auto/sdk v1.1.0 h1:cH53jehLUN6UFLY71z+NDOiNJqDdPRaXzTel0sJySYA=
 go.opentelemetry.io/auto/sdk v1.1.0/go.mod h1:3wSPjt5PWp2RhlCcmmOial7AvC4DQqZb7a7wCow3W8A=
 go.opentelemetry.io/otel v1.34.0 h1:zRLXxLCgL1WyKsPVrgbSdMN4c0FMkDAskSTQP+0hdUY=

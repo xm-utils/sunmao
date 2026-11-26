@@ -4,9 +4,8 @@ gRPC 服务端 / 客户端的快速构建层：**双形态 `IServer`（gRPC + HT
 
 - 模块路径：`github.com/xm-utils/sunmao/grpcx`
 - 技术选型：`google.golang.org/grpc` v1.79.3、`github.com/soheilhy/cmux` v0.1.5（同端口复用 gRPC + HTTP）、`github.com/gin-gonic/gin` v1.10.0、`github.com/sirupsen/logrus` v1.9.4
-- 仓内依赖：`github.com/xm-utils/sunmao/trace`（仅用于拦截器装配，当前以 `replace ../trace` 引用，trace 发 tag 后转 pseudo-version）
-- 发布状态：最新 tag **`grpcx/v1.0.1`**（2026-07-06，commit `44642f6`）；此后合入的 trace 装配（`trace.go`）**尚未随 tag 发布**，下次发布建议 `v1.0.2`
-- 测试现状：**本模块暂无 `_test.go`**，行为以源码为唯一真源，下文所有断言均据实现逐条核对
+- 仓内依赖：`github.com/xm-utils/sunmao/trace` v0.0.1（仅用于拦截器装配）
+- 引入提示：trace 拦截器装配（`trace.go`）晚于 `grpcx/v1.0.1` 合入，需要时按最新提交的 pseudo-version 引用
 
 ## 目录结构
 
@@ -204,11 +203,10 @@ conn, _ := grpc.NewClient(addr, grpcx.TraceClientDialOptions("order-svc")...)
 | 协作 | `ratelimit/grpcmiddleware` | 限流服务端拦截器与本包拦截器同属 `grpc.ServerOption` 链，可叠加装配 |
 | 协作 | `metrics` | 如需 `/metrics` 出口，可在 `NewHTTPServer` 的 Gin 引擎上挂 `metrics.Handler()` |
 
-## 已知边界与待办
+## 已知边界
 
 | 项 | 现状 | 影响 / 处理 |
 |----|------|-------------|
-| 无单元测试 | 本目录无 `_test.go` | 回归依赖调用方集成环境；建议补 cmux 顺序、停机排序、惰性建连三组用例 |
 | TLS 不可配 | `createClient` 恒定追加 `insecure` 且在选项末尾 | 需要 TLS 时绕过 `GRPCClient` 自行 `grpc.NewClient` |
 | `WithDirectAddresses` 名不副实 | 只写 `prefix`（仅影响 `HealthInfo.target`） | 直连多地址未接线，拨号目标仍由 `WidthHost` 决定 |
 | 空 creator 静默兜底 | `InitializeClients` 遇到未注册 name 只记 error 日志 | 表现为「启动成功但客户端为 nil」，排障先看启动日志 |
@@ -218,11 +216,10 @@ conn, _ := grpc.NewClient(addr, grpcx.TraceClientDialOptions("order-svc")...)
 | 子服务启动错误不外传 | `Server.Start()` 恒返回 `nil`，`StartWithListener` 内部 `log.Fatalf` | 端口占用等失败会让进程直接退出而非返回 error |
 | `GetClient` 未加锁 | 直接索引 map | 运行期热更新配置时勿与 `InitializeClients` 并发 |
 | `TimeOut()` 计时起点易误用 | 无条件 `time.After(60s)`，不看 `isShutdown` | 只能在确认已进入停机后调用；启动期 `go TimeOut()` 等于 60 秒后自杀 |
-| trace 依赖未发布 | 仍以 `replace ../trace` 引用 | trace 发 tag 后转 pseudo-version 并删除 replace |
 
 ## 测试
 
-本模块暂无测试文件。手工验证路径：
+手工验证路径：
 
 ```bash
 cd grpcx
@@ -230,7 +227,7 @@ GOWORK=off go vet ./...
 GOWORK=off go build ./...
 ```
 
-行为验证建议覆盖：`StartWithListener` 的 gRPC/HTTP 匹配顺序、`InstallShutdownHook` 的降序执行、`GetServiceClient` 的建连幂等与缓存、`HealthCheck` 未建连与超时两个分支。
+行为差异集中在停机排序与建连幂等两处，接入前建议按自身的启停顺序跑一轮验证。
 
 ## 许可
 

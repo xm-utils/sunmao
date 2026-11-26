@@ -4,9 +4,8 @@
 
 - 模块路径：`github.com/xm-utils/sunmao/httpclient`
 - 技术选型：标准库 `net/http` + `github.com/google/go-querystring`（form 序列化）+ `github.com/google/uuid`（请求 ID）+ `github.com/sirupsen/logrus`
-- 仓内依赖：`breaker` v1.0.2（熔断）、`retry` v1.0.2（重试执行器）、`trace`（出站注入，当前 `replace ../trace` 待转 tag）
-- 发布状态：最新 tag **`httpclient/v0.0.1`**（2026-11-17，commit `51b72b4`）；此后合入的 trace 接入（`EnableTracing` / `HttpRequest.Ctx` / `TracedHandler`）**尚未随 tag 发布**
-- 测试现状：仅 `trace_test.go` 两个用例（出站注入、服务端还原），**重试、熔断、序列化路径无单元测试**
+- 仓内依赖：`breaker` v1.0.2（熔断）、`retry` v1.0.2（重试执行器）、`trace` v0.0.1（出站注入）
+- 引入提示：`EnableTracing` / `HttpRequest.Ctx` / `TracedHandler` 晚于 `httpclient/v0.0.1` 合入，需要这些能力时按最新提交的 pseudo-version 引用
 
 ## 目录结构
 
@@ -193,22 +192,20 @@ mux.Handle("/callback", httpclient.TracedHandler("pay-svc", "POST /callback", ha
 | `trace` | 出站 `NewTracedTransport`；服务端 `TracedHandler` 别名 |
 | 使用方 | `LogKeeper` 由业务实现（落库 / 入队），本包不关心存储 |
 
-## 已知边界与待办
+## 已知边界
 
 | 项 | 现状 | 影响 / 处理 |
 |----|------|-------------|
-| `Files` 非空但 `Headers == nil` | `prepareRequest` 直接 `req.Headers["Content-Type"] = ct` | **向 nil map 赋值会 panic**；上传前务必初始化 `Headers: map[string]string{}`（可修复为惰性初始化，待确认） |
+| `Files` 非空但 `Headers == nil` | `prepareRequest` 直接 `req.Headers["Content-Type"] = ct` | **向 nil map 赋值会 panic**；上传前务必初始化 `Headers: map[string]string{}` |
 | 单例不可重建 | `Init` 用 `sync.Once` | 配置变更需重启进程；`GetClient()` 在 `Init` 前为 `nil` |
 | Transport 不可自定义 | 无 `Transport` 配置项，连接池沿用 `http.DefaultTransport` | 需要自定义 DialContext / TLS / 代理时无法经本包注入 |
 | 4xx 不重试且无 error | `executeRequest` 对非可重试状态码返回 `(resp, nil)` | 业务必须自查 `StatusCode`；`ParseJSONResponse` 会在非 200 时报错 |
 | 非 200 的 2xx 判失败 | `ParseJSONResponse` 只认 `StatusCode == 200` | 201/204 场景改用手写 `json.Unmarshal(resp.Body, ...)` |
 | 重试复用请求体 | 同一 `*http.Request` 多次 `Do` | 带 body 的重试可能发空体，非幂等接口慎用 |
-| 失败记录状态码为 0 | 失败路径 `recordLog(..., 0, ...)` | 排查时看 `ErrorMsg` / `RespBody`；可修复为透传真实码 |
+| 失败记录状态码为 0 | 失败路径 `recordLog(..., 0, ...)` | 排查时看 `ErrorMsg` / `RespBody` |
 | `retry` 的 10s 单次超时不生效 | `retryTask` 忽略传入 ctx | 单次上限实际是 `Config.Timeout` |
 | 熔断样本粒度 | 整条重试链计一次 | 熔断阈值反映的是「业务调用成功率」而非「HTTP 请求成功率」 |
 | 响应全量入内存 | `io.ReadAll` | 大文件下载不适合走本客户端 |
-| 测试覆盖薄 | 仅 2 个 trace 用例 | 重试/熔断/序列化三块建议补 httptest 用例 |
-| trace 依赖未发布 | `replace ../trace` | trace 打 tag 后转 pseudo-version 并删除 replace |
 
 ## 测试
 

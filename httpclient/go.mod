@@ -37,5 +37,3 @@ require (
 )
 
 require golang.org/x/sys v0.29.0 // indirect
-
-replace github.com/xm-utils/sunmao/trace => ../trace
