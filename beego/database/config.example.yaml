@@ -1,0 +1,31 @@
+# Beego Database 配置示例文件
+# 将此文件保存为 database.yaml 并在应用中加载（如配合 viper），字段说明见行内注释
+# 对应结构体：database.MysqlConfig（模块 github.com/xm-utils/sunmao/beego/database）
+#
+# 注意：本模块基于 beego orm 的全局注册表，InitMysql 内部依次执行
+# orm.RegisterDriver("mysql", orm.DRMySQL) 与 orm.RegisterDataBase(db_alias, ...)，
+# 同一 db_alias 重复调用会返回错误；模型注册（orm.RegisterModel）由调用方自行完成。
+
+# ==================== 连接标识（必填） ====================
+db_alias: "default"          # orm 连接名称；业务侧 orm.NewOrmUsingDB("<alias>") 用它切换多库
+
+# ==================== 连接信息 ====================
+db_name: "mydb"              # 数据库名称
+db_user: "root"              # 数据库连接用户名
+db_pwd: "password"           # 数据库连接密码
+db_host: "127.0.0.1"         # 数据库IP（域名）
+db_port: "3306"              # 数据库端口
+
+# ==================== 行为开关 ====================
+db_debug: "false"            # 是否调试模式：字符串 "true" 才生效（注意不是 bool），开启后 SQL 日志转发到 logrus
+db_table_prefix: ""          # 表前缀，如 "app_" 时 TableName("users") -> "app_users"
+
+# ==================== DSN 参数（可留空使用默认值） ====================
+db_charset: "utf8mb4"        # 字符集，留空默认 utf8mb4
+db_location: "Asia/Shanghai" # 时区，留空默认 Local；DSN 固定附带 parseTime=true
+
+# ==================== 连接池配置（均可留空，使用括号内默认值） ====================
+db_max_idle_conns: 10        # 最大空闲连接数（默认 10）
+db_max_open_conns: 100       # 最大打开连接数（默认 100）
+db_conn_max_lifetime: 3600   # 连接最大存活时间/秒（默认 3600）
+db_conn_max_idle_time: 600   # 连接最大空闲时间/秒（默认 600）
