@@ -173,11 +173,31 @@ function rewriteLink(url, srcDir) {
 // 支持 URL 中的圆括号（badge 链接 [![x]( shields )](LICENSE) 的外层部分）与 title
 const LINK_RE = /(!?\[(?:[^\[\]]|\[[^\]]*\])*\])\(((?:[^()\s]|\([^()]*\))+)(?:\s+"[^"]*")?\)/g;
 
-function rewriteMarkdown(md, srcRelDir) {
-  return md.replace(LINK_RE, (all, label, url) => {
+// 改写单个普通段落行：行内代码内的匹配跳过（起始位置之前有奇数个反引号即处于 span 内），
+// 避免 `Ctx[T](ctx)` 被当成链接；而 [`client` 子包](client/README.md) 这类
+// 反引号只包住链接文字的写法仍需正常改写。
+function rewriteInline(line, srcRelDir) {
+  return line.replace(LINK_RE, (all, label, url, index) => {
+    if (((line.slice(0, index).match(/`/g) || []).length) % 2) return all;
     const next = rewriteLink(url, srcRelDir);
     return next === undefined ? all : `${label}(${next})`;
   });
+}
+
+// 代码围栏与行内代码内的内容原样保留：Go 的 `database.Ctx[User](ctx)` 会被
+// LINK_RE 误判成 [User](ctx)，进而被补成仓库 blob 链接，污染示例代码。
+function rewriteMarkdown(md, srcRelDir) {
+  let fence = false;
+  return md
+    .split('\n')
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        fence = !fence;
+        return line;
+      }
+      return fence ? line : rewriteInline(line, srcRelDir);
+    })
+    .join('\n');
 }
 
 function frontmatter(title, description) {
